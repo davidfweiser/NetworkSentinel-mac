@@ -1,8 +1,8 @@
 # Network Sentinel (macOS)
 
-Native **macOS** desktop app for **live network monitoring**, **remote peer tracking**, **break-in heuristics**, and **host firewall blocking** — with a modern dark Avalonia UI sharing a palette with the iOS app.
+Native **macOS** desktop app for **live network monitoring**, **remote peer tracking**, **break-in heuristics**, **signature detection**, **DNS hygiene**, and **host firewall enforcement** — with a modern dark Avalonia UI sharing a palette with the iOS app.
 
-> Awareness / monitoring tooling — not a full IDS/IPS replacement.
+> **Host-based** intrusion detection and prevention. It detects on its own heuristics and, with Suricata attached (0.6.x), on signature/payload inspection — then enforces in the kernel via **PF**. It is not an inline network appliance: it protects the Mac it runs on, not a segment, and it does not sit in the forwarding path.
 
 macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.6.2**.
 
@@ -124,7 +124,8 @@ Full setup is under [HTTPS and remote access](#https-and-remote-access-050) belo
 - **Block local ports** (TCP/UDP)
 - Dedicated **PF anchor** `com.networksentinel` (only manages its own rules)
 - Block rules are created as an `-In`/`-Out` pair and **removed together** in one click
-- **Auto-block** on/off with minimum severity (`Medium` / `High` / `Critical`)
+- **Auto-block** on/off with minimum severity (`Medium` / `High` / `Critical`), run through one prevention engine shared by all three front-ends — see [Auto-block](#auto-block)
+- **Dry run** — decide and report what would be blocked without writing a single PF rule
 - Settings in `~/Library/Application Support/NetworkSentinel/settings.json`
 - **Authorize firewall** — elevates only `pfctl` via Mac admin password dialog. The GUI always runs as your user
 
@@ -145,6 +146,7 @@ Trusted sites are protected so auto-block (and manual block) will not cut off ev
 - [.NET 8 SDK or runtime](https://dotnet.microsoft.com/download) (or use a self-contained publish)
 - Avalonia desktop dependencies (bundled with the runtime on macOS)
 - Admin rights (password dialog) for PF firewall changes
+- Optional, each enabling one detector: `brew install suricata` (signature alerts), `brew install wireguard-tools` (peer monitoring). PF flow events and DNS hygiene additionally need PF enabled and **silent** root — see [PF flow events](#pf-flow-events)
 
 ---
 
@@ -203,7 +205,7 @@ dotnet run -c Release -- -w 18765    # explicit port
 | **Ports** | Local listeners; one-click **Block port** |
 | **Firewall** | Managed rules grouped as In/Out pairs; manual IP and port blocking; **Restore allowlisted** |
 | **Allowlist** | Add/remove trusted domains and IPs; refresh the feed |
-| **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity, block direction, allowlist feed, **change master password**, **Remove all rules** |
+| **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **Suricata alerts**, **WireGuard peer watch**, **PF flow events**, **DNS hygiene**, **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity + **dry run**, block direction, allowlist feed, **change master password**, **Remove all rules** |
 
 #### Sleep / Wake
 
@@ -279,6 +281,18 @@ Run both as your normal user — **not** under `sudo`. They write into *your* `~
 The token is stored in `~/Library/Application Support/NetworkSentinel/duckdns.json` with mode `0600`, is **never sent to the browser** (the settings page shows only whether one is saved), and never appears in the update URL's response. While the console runs it refreshes the A record every 5 minutes. `acme.sh` installs its own renewal cron entry.
 
 > **Before you forward a port.** This console can add and remove firewall rules on this Mac, and anyone who guesses the master password gets that control. A VPN or [Tailscale](https://tailscale.com) is the safer way to reach it from outside — `tailscale serve` even supplies a valid certificate with no port-forwarding at all. If you do forward a port, forward **only** the HTTPS one and use a long unique password.
+
+### Tests
+
+```bash
+dotnet test Tests/NetworkSentinel.Tests
+```
+
+180 xunit tests covering the pure-logic seams the enforcement path depends on: IP normalization (port stripping, zone ids, IPv4-mapped collapse), the non-public/CGNAT range boundaries, atomic writes under concurrent writers, the prevention gate stack (driven end to end in dry-run mode, so no rule is ever written), `pfctl -s state` and `wg show` parsing, Suricata EVE alerts, and DNS hygiene detections.
+
+`TestEnv` points `HOME` at a throwaway directory before anything touches `AppPaths`, and **fails loudly** if the redirect did not take — otherwise a persisting service would write into your real `~/Library/Application Support/NetworkSentinel`.
+
+Two seams stay uncovered, both needing a live privileged firewall: the startup ledger↔PF reconciliation's actual `pfctl` calls, and the auto-block retry timing.
 
 ### Release build
 
@@ -409,20 +423,36 @@ A **manual** block of a CGNAT address is still allowed, behind a confirmation na
 ## How it works (high level)
 
 ```text
-┌─────────────────┐     poll ~1.2s      ┌──────────────────────┐
-│  macOS lsof /   │ ─────────────────► │ NetworkMonitorService │
-│  netstat        │                    └──────────┬───────────┘
-└─────────────────┘                               │
-                                                  ▼
-                                       ┌──────────────────────┐
-                                       │ IntrusionDetector    │
-                                       │ (heuristics)         │
-                                       └──────────┬───────────┘
-                                                  │
-                    ┌─────────────────────────────┼─────────────────────────────┐
-                    ▼                             ▼                             ▼
-           Geo / DNS lookup         Avalonia UI  or  TUI          FirewallService
-           (origin details)         (MVVM / Spectre)              osascript → pfctl
+  SentinelCore builds and cross-wires the graph below; the GUI, TUI and web
+  console are only event handlers and presentation on top of it.
+
+┌──────────────────┐   poll ~1.2s   ┌───────────────────────┐
+│ lsof / netstat   │ ─────────────► │                       │
+├──────────────────┤                │                       │
+│ pfctl -s state   │  flow events   │ NetworkMonitorService  │
+│ (UDP + forwarded)│ ─────────────► │                       │
+├──────────────────┤                │                       │
+│ unified log,     │                │                       │
+│ pflog0, nettop,  │ ─────────────► │                       │
+│ wg, Suricata EVE │                └───────────┬───────────┘
+└──────────────────┘                            │
+                                                ▼
+                     ┌──────────────────────────────────────────────┐
+                     │ Detectors: heuristics · threat intel · proc  │
+                     │ reputation · ARP · launch items · exfil ·    │
+                     │ honeypot · signatures · WireGuard · DNS      │
+                     └──────────────────────┬───────────────────────┘
+                                            │ ThreatEvent
+                                            ▼
+                     ┌──────────────────────────────────────────────┐
+                     │ PreventionService — one gate stack, one       │
+                     │ enforcement path (dry run stops here)        │
+                     └──────────────────────┬───────────────────────┘
+                                            │
+              ┌─────────────────────────────┼─────────────────────────┐
+              ▼                             ▼                         ▼
+     Geo / DNS lookup          GUI · TUI · web console        FirewallService
+     (origin details)          (MVVM / Spectre / Kestrel)     osascript → pfctl
 ```
 
 ---
@@ -438,7 +468,15 @@ A **manual** block of a CGNAT address is still allowed, behind a confirmation na
 | `Services/FirewallService.cs` | PF via pfctl + osascript; rule ledger; PF probe-log rule |
 | `Services/AuthLogMonitor.cs` | Failed-logon detection from the macOS unified log |
 | `Services/ProbeLogMonitor.cs` | Closed-port scan detection from the PF packet log |
-| `Services/AppSettings.cs` / `AppPaths.cs` | Application Support + JSON settings |
+| `Services/AppSettings.cs` / `AppPaths.cs` | Application Support + JSON settings; atomic (temp-sibling + rename) writes |
+| `Services/SentinelCore.cs` | Composition root — builds and cross-wires the graph all three front-ends share |
+| `Services/PreventionService.cs` | The single enforcement engine: gate stack, suppression, retry/elevation backoff, dry run |
+| `Services/LocalAddresses.cs` | This Mac's own interface addresses, so a detector can never firewall the host off from itself |
+| `Services/SuricataService.cs` | Tails Suricata's EVE JSON and turns alerts into threat events |
+| `Services/WireGuardMonitor.cs` | `wg show all dump` — peers, handshakes, per-peer transfer; reads no key material |
+| `Services/DnsHygieneMonitor.cs` | Plaintext/DoT/DoH classification, resolver drift, allowlist poisoning |
+| `Native/PfStateFlows.cs` | PF state-table flow events (UDP + forwarded traffic) — the macOS stand-in for conntrack netlink |
+| `Tests/NetworkSentinel.Tests/` | xunit suite (180 tests); `TestEnv` redirects `HOME` so nothing touches the real profile |
 | `ViewModels/MainViewModel.cs` | UI state, commands, auto-block wiring, Settings view (incl. Remote access) |
 | `MainWindow.axaml` | Avalonia dashboard UI |
 | `Themes/Colors.axaml` | Palette ported from `NetworkSentinel-iOS/Theme.swift`, shared with the web console |
@@ -467,6 +505,12 @@ A **manual** block of a CGNAT address is still allowed, behind a confirmation na
 | `getent passwd` (service user) | `dscl . -read /Users/…` + `id -u/-g` |
 | `systemd` web service | run `--web` directly (no launchd unit shipped yet) |
 | `notify-send` / `gdbus` desktop alerts | `osascript display notification` (or `terminal-notifier` when installed) |
+| conntrack **netlink** flow events (`AF_NETLINK`/`NETLINK_NETFILTER`) | **polled** PF state table (`pfctl -s state`, diffed each second) — macOS has no netlink equivalent, so this is a reimplementation rather than a port. A flow that opens *and* closes inside one interval is missed |
+| `ip6tables` for IPv6 blocking | PF rules cover both families, so no second backend. The zone-id/IPv4-mapped address normalization from that change does apply here |
+| `/var/log/suricata/eve.json` | Homebrew's prefix, resolved at runtime (`/opt/homebrew/…` on Apple Silicon, `/usr/local/…` on Intel) |
+| `wg` on `PATH` | `wg` by absolute Homebrew path — a Finder- or launchd-launched app does not inherit the shell `PATH` |
+| polkit wording for elevation failures | osascript's `User canceled. (-128)`, which is what a dismissed admin dialog returns |
+| `XDG_DATA_HOME` redirect in tests | `HOME` redirect, since `AppPaths` resolves Application Support from the user profile |
 
 ---
 
