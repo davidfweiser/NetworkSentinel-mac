@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # Lets the suite be run by hand from the Actions tab — useful when a push came
+  # from an integration token, which does not itself start a workflow run.
+  workflow_dispatch:
+
+# Build and test need nothing but the source.
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # macOS runner: the app targets macOS APIs (pfctl, nettop, scutil) and the
+    # tests redirect HOME to a temp profile, so they must run where AppPaths
+    # resolves the way it does in production.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build app
+        run: dotnet build NetworkSentinel.csproj -c Release
+
+      - name: Run tests
+        run: dotnet test Tests/NetworkSentinel.Tests -c Release
