@@ -1,10 +1,10 @@
 # Network Sentinel (macOS)
 
-Native **macOS** desktop app for **live network monitoring**, **remote peer tracking**, **break-in heuristics**, **signature detection**, **DNS hygiene**, and **host firewall enforcement** — with a modern dark Avalonia UI sharing a palette with the iOS app.
+Native **macOS** desktop app for **live network monitoring**, **data-flow metering**, **remote peer tracking**, **break-in heuristics**, **signature detection**, **DNS hygiene**, and **host firewall configuration and enforcement** — with a modern dark Avalonia UI sharing a palette with the iOS app.
 
 > **Host-based** intrusion detection and prevention. It detects on its own heuristics and, with Suricata attached (0.6.x), on signature/payload inspection — then enforces in the kernel via **PF**. It is not an inline network appliance: it protects the Mac it runs on, not a segment, and it does not sit in the forwarding path.
 
-macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.6.2**.
+macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.0**.
 
 ---
 
@@ -17,7 +17,28 @@ macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/Net
 | **Live connections** | Process name, local/remote endpoints, TCP state, origin summary |
 | **Remote computers** | Peers observed talking to this Mac, reverse DNS, geo/ISP when public |
 | **Activity chart** | Live ~5-minute chart of connection samples with **threat markers** and a current/peak legend |
+| **Data flow charts** (0.7.0) | Live in/out throughput on one shared scale, this month's totals, and a **month of daily bars** (or twelve months) — see [Data-flow metering](#data-flow-metering-070) |
 | **Poll interval** | Selectable in **Settings** (0.5 s – 10 s); doubles as the chart's sample rate |
+
+### Data-flow metering (0.7.0)
+
+The dashboard answers "how much data went in and out?" as well as "who is talking to this Mac?". Three cards, all fed by one meter:
+
+| Card | What it shows |
+|------|----------------|
+| **Data flow** | Inbound and outbound throughput over the last ~10 minutes, drawn on **one shared zero-based scale** — two independently scaled lines would make a trickle of uploads look like a match for a saturated download |
+| **This month** | Bytes in, bytes out, the total, and the daily average so far |
+| **Monthly data in and out** | Paired bars per day for the current month, or per month for the last twelve |
+
+The source is `netstat -ib` — the cumulative per-interface byte counters the kernel already maintains. No packet capture, no root, and one short-lived subprocess every 5 seconds. Each sample is diffed against the previous one, so the chart shows traffic rather than counter values.
+
+Three details decide whether the numbers are right, and each is covered by a test:
+
+- **One row per interface.** netstat prints an interface once per address it holds and repeats the same totals on every row; only the `<Link#n>` row is counted. Summing all of them would multiply a dual-stack interface's traffic by four or five.
+- **Physical interfaces only.** A VPN's `utun` carries bytes that already crossed `en0`, encapsulated — counting both double-counts every tunnelled byte. Loopback is excluded for the same reason it is excluded everywhere else: it never leaves the machine.
+- **Counters reset.** A reboot or an interface bounce restarts them at zero; a counter that moved backwards is treated as a fresh start and its current value is the delta.
+
+Daily totals persist to `traffic-history.json` (400 days, enough for the twelve-month view), and so do the last raw counters — on the next launch the diff continues where it left off, so traffic that crossed the wire while the console was closed still counts. That first delta spans however long the app was shut, so it is added to the day's total but deliberately **not** charted as a rate: dividing hours of traffic by one 5-second interval would draw a spike that never happened and flatten every real reading after it. Turn the whole thing off in **Settings → Monitoring → Traffic metering**; the history is kept, just no longer updated.
 
 ### Threat awareness
 Heuristics flag patterns such as:
@@ -128,6 +149,30 @@ Full setup is under [HTTPS and remote access](#https-and-remote-access-050) belo
 - **Dry run** — decide and report what would be blocked without writing a single PF rule
 - Settings in `~/Library/Application Support/NetworkSentinel/settings.json`
 - **Authorize firewall** — elevates only `pfctl` via Mac admin password dialog. The GUI always runs as your user
+
+### Firewall configuration (0.7.0)
+
+**Firewall Config**, a submenu under **Firewall & Block**, is where rules are written by hand — add, edit and delete inbound and outbound rules, laid out the way the Linode Cloud Manager firewall page lays them out and the way [FireWallConfig](https://github.com/davidfweiser/FireWallConfig) does on Ubuntu: one list per direction, columns for **Label · Action · Protocol · Port range · Sources**, and one form that both creates and edits.
+
+| Field | Accepts |
+|-------|---------|
+| **Preset** | SSH, HTTP, HTTPS, DNS, MySQL, PostgreSQL, WireGuard, the web console's ports, ICMP — or Custom |
+| **Action** | `Allow` or `Block` |
+| **Direction** | `Inbound` or `Outbound` |
+| **Label** | `block-inbound-ssh`; left empty, it is **minted from the port's service name** |
+| **Protocol** | TCP, UDP, ICMP, or Any |
+| **Port range** | `22`, `8000-8001`, `80, 443` — empty means every port |
+| **Sources** / **Destinations** | `All IPv4, All IPv6`, `10.0.0.0/8`, `203.0.113.5`, or a comma-separated mix |
+
+Rules land in the same PF anchor and the same `firewall-rules.json` ledger as everything else the app blocks, so they survive a restart and are re-applied by the [startup reconciliation](#auto-block).
+
+**What the view is careful to say.** macOS PF passes anything no rule matches, so an **Allow** rule opens a path *through the rules above it* — it does not grant access on its own, and this page says so rather than implying a deny-by-default firewall that is not there.
+
+**Precedence is fixed, not incidental.** Every rule is written `quick`, so the anchor is first-match-wins. Blocks minted by auto-block and the Firewall page are emitted **first**, then config rules in list order. A config *Allow* rule therefore cannot reopen an address auto-block just shut — which is exactly what would happen if ledger insertion order decided precedence.
+
+**Two rules get a confirmation before they load**: one that blocks every address on every port in a direction, and one that blocks inbound SSH. Both are legitimate; both can end your access to the machine while you are using it. A rule PF refuses to load is rolled back out of the ledger rather than left there claiming to be in force.
+
+Rules created *by the app* (auto-block, manual blocks, the probe-log rule) are listed too, labelled in a **Created by** column, and can be deleted from here — deleting an auto-block rule suppresses re-blocking for 24 hours, exactly as releasing it on the Firewall page does. They cannot be *edited* here: rewriting one as a config rule would change what it matches.
 
 ### Known-good allowlist (never block)
 Trusted sites are protected so auto-block (and manual block) will not cut off everyday tools:
@@ -314,8 +359,8 @@ Self-contained (no system .NET runtime needed):
 `package.sh` produces `dist/networksentinel-<version>-<rid>.tar.gz` plus a ready `dist/Network Sentinel.app` you can drag to Applications. To install from the tarball on a Mac with no .NET:
 
 ```bash
-tar xzf networksentinel-0.6.2-osx-arm64.tar.gz
-cd networksentinel-0.6.2-osx-arm64
+tar xzf networksentinel-0.7.0-osx-arm64.tar.gz
+cd networksentinel-0.7.0-osx-arm64
 sudo ./install.sh                        # /Applications + /usr/local/bin
 ./install.sh --user                      # ~/Applications + ~/.local/bin, no root
 sudo ./install.sh --desktop-shortcut     # also drop a shortcut on the Desktop
@@ -370,12 +415,13 @@ PF details:
 
 | Tab | Purpose |
 |-----|---------|
-| **Dashboard** | Stats, activity chart, latest threats, observed hosts |
+| **Dashboard** | Stats, activity chart, **data-flow and monthly in/out charts**, latest threats, observed hosts |
 | **Live Connections** | Active TCP sessions; block remote IP per row |
 | **Remote Computers** | Tracked peers, origin, threat level; block / unblock |
 | **Break-in Attempts** | Heuristic alerts with origin and method |
 | **Open Ports** | Listening TCP/UDP; optional inbound port block |
 | **Firewall & Block** | Manual IP/port rules, auto-block, allowlist, managed rule list |
+| **Firewall Config** | Add / edit / delete inbound and outbound rules — Linode-style lists per direction |
 | **Settings** | Mirrors the web console's Settings tab, including **Remote access** (below) |
 
 ### Remote access from the desktop Settings (0.5.0)
@@ -453,7 +499,16 @@ A **manual** block of a CGNAT address is still allowed, behind a confirmation na
               ▼                             ▼                         ▼
      Geo / DNS lookup          GUI · TUI · web console        FirewallService
      (origin details)          (MVVM / Spectre / Kestrel)     osascript → pfctl
+                                            ▲                         ▲
+                                            │                         │
+                      ┌─────────────────────┴──────┐   ┌──────────────┴─────────────┐
+                      │ TrafficMeterService        │   │ Firewall Config rules      │
+                      │ netstat -ib → rates +      │   │ (label · action · proto ·  │
+                      │ daily in/out history       │   │  ports · addresses) → PF   │
+                      └────────────────────────────┘   └────────────────────────────┘
 ```
+
+The meter runs on its own 5-second cadence rather than the monitor's poll: the byte counters are cumulative, so consistent spacing is what makes the deltas comparable, and metering continues while monitoring is paused.
 
 ---
 
@@ -465,7 +520,9 @@ A **manual** block of a CGNAT address is still allowed, behind a confirmation na
 | `Services/NetworkMonitorService.cs` | Polling loop, host tracking, stats |
 | `Services/IntrusionDetector.cs` | Heuristic threat engine |
 | `Services/GeoIpService.cs` | Reverse DNS + public geo lookup |
-| `Services/FirewallService.cs` | PF via pfctl + osascript; rule ledger; PF probe-log rule |
+| `Services/FirewallService.cs` | PF via pfctl + osascript; rule ledger; PF probe-log rule; config-rule save/delete |
+| `Services/FirewallRuleSpec.cs` | The Firewall Config rule: port/address parsing, validation, PF rendering |
+| `Services/TrafficMeterService.cs` | `netstat -ib` byte counters → live rates + a persisted daily in/out history |
 | `Services/AuthLogMonitor.cs` | Failed-logon detection from the macOS unified log |
 | `Services/ProbeLogMonitor.cs` | Closed-port scan detection from the PF packet log |
 | `Services/AppSettings.cs` / `AppPaths.cs` | Application Support + JSON settings; atomic (temp-sibling + rename) writes |
@@ -476,8 +533,11 @@ A **manual** block of a CGNAT address is still allowed, behind a confirmation na
 | `Services/WireGuardMonitor.cs` | `wg show all dump` — peers, handshakes, per-peer transfer; reads no key material |
 | `Services/DnsHygieneMonitor.cs` | Plaintext/DoT/DoH classification, resolver drift, allowlist poisoning |
 | `Native/PfStateFlows.cs` | PF state-table flow events (UDP + forwarded traffic) — the macOS stand-in for conntrack netlink |
-| `Tests/NetworkSentinel.Tests/` | xunit suite (180 tests); `TestEnv` redirects `HOME` so nothing touches the real profile |
+| `Tests/NetworkSentinel.Tests/` | xunit suite (235 tests); `TestEnv` redirects `HOME` so nothing touches the real profile |
 | `ViewModels/MainViewModel.cs` | UI state, commands, auto-block wiring, Settings view (incl. Remote access) |
+| `ViewModels/MainViewModel.FirewallConfig.cs` | Firewall Config view: rule lists, the add/edit form, impact confirmations |
+| `ViewModels/MainViewModel.Traffic.cs` | Dashboard data-flow charts and month totals |
+| `Controls/Sparkline.cs` / `Controls/TrafficChart.cs` | Connection-activity chart; dual in/out line and paired-bar charts |
 | `MainWindow.axaml` | Avalonia dashboard UI |
 | `Themes/Colors.axaml` | Palette ported from `NetworkSentinel-iOS/Theme.swift`, shared with the web console |
 | `Tui/TuiApp.cs` | Spectre.Console terminal UI (`--tui`) |

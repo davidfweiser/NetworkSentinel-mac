@@ -326,6 +326,61 @@ public sealed class ActivitySample
     public int RemoteHostCount { get; init; }
 }
 
+/// <summary>One throughput reading — bytes per second in each direction.</summary>
+public sealed class TrafficSample
+{
+    public DateTime Time { get; init; }
+    public double BytesInPerSecond { get; init; }
+    public double BytesOutPerSecond { get; init; }
+}
+
+/// <summary>
+/// Bytes in/out over one span — a calendar day on the month chart, a calendar
+/// month on the year chart.
+/// </summary>
+public sealed class TrafficBucket
+{
+    public DateTime Start { get; init; }
+    public string Label { get; init; } = "";
+    public long BytesIn { get; init; }
+    public long BytesOut { get; init; }
+
+    public long BytesTotal => BytesIn + BytesOut;
+    public string InText => ByteSize.Format(BytesIn);
+    public string OutText => ByteSize.Format(BytesOut);
+    public string TotalText => ByteSize.Format(BytesTotal);
+}
+
+/// <summary>
+/// Decimal (SI) byte formatting, the convention link speeds and data caps use —
+/// 1 GB is 1,000,000,000 bytes here, not 2^30.
+/// </summary>
+public static class ByteSize
+{
+    private static readonly string[] Units = { "B", "kB", "MB", "GB", "TB", "PB" };
+
+    public static string Format(double bytes)
+    {
+        if (double.IsNaN(bytes) || bytes <= 0) return "0 B";
+
+        var unit = 0;
+        while (bytes >= 1000 && unit < Units.Length - 1)
+        {
+            bytes /= 1000;
+            unit++;
+        }
+
+        // Bytes and kB are never fractional in practice; larger units read better
+        // with one decimal until they reach three digits.
+        var digits = unit <= 1 ? 0 : (bytes >= 100 ? 0 : 1);
+        return $"{bytes.ToString($"F{digits}")} {Units[unit]}";
+    }
+
+    /// <summary>Formats a rate; "—" when the meter has nothing to report yet.</summary>
+    public static string FormatRate(double bytesPerSecond)
+        => bytesPerSecond <= 0 ? "0 B/s" : $"{Format(bytesPerSecond)}/s";
+}
+
 public sealed class DashboardStats : INotifyPropertyChanged
 {
     private int _listeningPorts;

@@ -33,6 +33,13 @@ public sealed class AppSettings
     public bool AllowlistUseRemoteFeed { get; set; } = true;
 
     /// <summary>
+    /// Meter bytes in/out from the interface counters and keep the daily history
+    /// behind the dashboard's data-flow charts. Unprivileged and cheap, so on by
+    /// default; turning it off also stops the history file from growing.
+    /// </summary>
+    public bool TrafficMeterEnabled { get; set; } = true;
+
+    /// <summary>
     /// Actively warn when a Critical-level threat is detected: desktop notification
     /// in the GUI, tab-title badge + browser notification in the web console.
     /// </summary>

@@ -203,10 +203,15 @@ public sealed class FirewallService
 
             // Blocks are created as an -In/-Out pair. Removing only the clicked row left
             // the sibling active, so the IP stayed blocked and remove "didn't work".
+            //
+            // Config rules are never paired, and their names end in an operator's
+            // label — "block-inbound-In" would otherwise drag an unrelated
+            // "block-inbound-Out" rule out of the ledger with it.
+            var isPaired = !name.StartsWith($"{RulePrefix}-Rule-", StringComparison.OrdinalIgnoreCase);
             var siblings = new List<string> { name };
-            if (name.EndsWith("-In", StringComparison.OrdinalIgnoreCase))
+            if (isPaired && name.EndsWith("-In", StringComparison.OrdinalIgnoreCase))
                 siblings.Add(name[..^"-In".Length] + "-Out");
-            else if (name.EndsWith("-Out", StringComparison.OrdinalIgnoreCase))
+            else if (isPaired && name.EndsWith("-Out", StringComparison.OrdinalIgnoreCase))
                 siblings.Add(name[..^"-Out".Length] + "-In");
 
             // Drop both from the ledger first, then reload PF once — one password
@@ -341,6 +346,87 @@ public sealed class FirewallService
         return FirewallOperationResult.Ok(
             $"Restored {removed} allowlisted address(es): {string.Join("; ", notes.Take(12))}" +
             (notes.Count > 12 ? "…" : ""));
+    }
+
+    // ── Firewall Config rules (operator-authored) ────────────────────────
+
+    /// <summary>
+    /// Every managed rule in ledger order, which is the order they are loaded
+    /// into PF. <see cref="GetManagedRules"/> sorts for the flat rule list;
+    /// the Firewall Config view needs the real evaluation order instead,
+    /// because the ruleset is first-match-wins.
+    /// </summary>
+    public IReadOnlyList<FirewallRuleInfo> GetConfigRules()
+    {
+        var ledger = LoadLedger();
+        return ledger
+            // App-minted blocks are written to the anchor ahead of config rules
+            // (see BuildPfRuleset), so the list has to show them that way too.
+            .OrderBy(r => r.Kind == FirewallRuleKind.Custom ? 1 : 0)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Creates or replaces one operator-authored rule and reloads PF.
+    /// Passing <paramref name="replaceName"/> edits in place: the old entry is
+    /// dropped and the new one takes its position at the end of the config
+    /// section, in one ledger write and one elevation prompt.
+    /// </summary>
+    public FirewallOperationResult SaveCustomRule(FirewallRuleSpec spec, string? replaceName = null)
+    {
+        var normalized = FirewallRuleSpecs.Normalize(spec);
+        var error = FirewallRuleSpecs.Validate(normalized);
+        if (error.Length > 0)
+            return FirewallOperationResult.Fail(error);
+
+        if (!IsAdministrator)
+            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+
+        string name;
+        lock (LedgerGate)
+        {
+            var ledger = LoadLedger();
+            if (!string.IsNullOrWhiteSpace(replaceName))
+            {
+                var existing = ledger.FirstOrDefault(r =>
+                    string.Equals(r.Name, replaceName, StringComparison.OrdinalIgnoreCase));
+                if (existing == null)
+                    return FirewallOperationResult.Fail($"No rule named “{replaceName}” to edit — it may have been removed.");
+                if (existing.Kind != FirewallRuleKind.Custom)
+                    return FirewallOperationResult.Fail("Only Firewall Config rules can be edited here.");
+                ledger.RemoveAll(r => string.Equals(r.Name, replaceName, StringComparison.OrdinalIgnoreCase));
+            }
+
+            name = UniqueCustomRuleName(normalized.Label, ledger);
+            ledger.Add(FirewallRuleSpecs.ToRule(normalized, name));
+            SaveLedger(ledger);
+        }
+
+        var applied = ApplyPfFromLedger();
+        if (applied.Success)
+        {
+            return FirewallOperationResult.Ok(string.IsNullOrWhiteSpace(replaceName)
+                ? $"Added rule “{normalized.Label}”."
+                : $"Saved rule “{normalized.Label}”.");
+        }
+
+        // A rule PF would not load must not stay in the ledger claiming to be in
+        // force — the next apply would fail on it too, taking every other rule
+        // with it.
+        RemoveFromLedger(name);
+        ApplyPfFromLedger();
+        return FirewallOperationResult.Fail($"PF rejected the rule, so it was not kept: {applied.Message}");
+    }
+
+    /// <summary>Rule names are the ledger key, so a repeated label gets a suffix.</summary>
+    private static string UniqueCustomRuleName(string label, List<FirewallRuleInfo> ledger)
+    {
+        var baseName = $"{RulePrefix}-Rule-{Sanitize(label)}";
+        var name = baseName;
+        var suffix = 2;
+        while (ledger.Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
+            name = $"{baseName}-{suffix++}";
+        return name;
     }
 
     public IReadOnlyList<FirewallRuleInfo> GetManagedRules()
@@ -521,14 +607,21 @@ public sealed class FirewallService
                $"/sbin/pfctl -a {ShellQuote(PfAnchorName)} -f {ShellQuote(systemRules)}\n";
     }
 
-    private static string BuildPfRuleset(IEnumerable<FirewallRuleInfo> rules)
+    internal static string BuildPfRuleset(IEnumerable<FirewallRuleInfo> rules)
     {
+        var live = rules.Where(r => r.Enabled && !r.IsExpired).ToList();
+
         var sb = new StringBuilder();
         sb.AppendLine($"# Network Sentinel PF anchor — managed rules (do not edit by hand)");
         sb.AppendLine($"# Generated {DateTime.Now:u}");
         sb.AppendLine();
 
-        foreach (var rule in rules.Where(r => r.Enabled && r.IsBlock && !r.IsExpired))
+        // Every rule below is `quick`, so the file is first-match-wins. App-minted
+        // blocks are emitted FIRST and therefore always win: a Firewall Config
+        // "Allow" rule must never be able to reopen an address that auto-block
+        // just shut, which is exactly what would happen if the ledger's insertion
+        // order decided precedence.
+        foreach (var rule in live.Where(r => r.IsBlock && r.Kind != FirewallRuleKind.Custom))
         {
             // Comment encodes rule name for remove-by-name and human debugging
             sb.AppendLine($"# {rule.Name}");
@@ -556,6 +649,14 @@ public sealed class FirewallService
             sb.AppendLine();
         }
 
+        // Firewall Config rules, in the order the operator listed them.
+        foreach (var rule in live.Where(r => r.Kind == FirewallRuleKind.Custom))
+        {
+            sb.AppendLine($"# {rule.Name}");
+            sb.AppendLine(FirewallRuleSpecs.BuildPfLine(rule));
+            sb.AppendLine();
+        }
+
         // Probe-log rule, deliberately LAST and deliberately not `quick`.
         //
         // macOS pfctl has no `match` keyword (it is a syntax error here), so the
@@ -566,7 +667,7 @@ public sealed class FirewallService
         // creates no state entry, so every other packet of the connection is
         // evaluated exactly as it was before. The net behaviour change is confined
         // to inbound TCP SYNs that nothing else in the ruleset blocked.
-        if (rules.Any(r => r.Enabled && string.Equals(r.Name, ProbeLogRuleName, StringComparison.OrdinalIgnoreCase)))
+        if (live.Any(r => string.Equals(r.Name, ProbeLogRuleName, StringComparison.OrdinalIgnoreCase)))
         {
             sb.AppendLine($"# {ProbeLogRuleName}");
             sb.AppendLine("pass in log proto tcp from any to any flags S/SA no state");
@@ -1267,12 +1368,27 @@ public enum FirewallRuleKind
 {
     IpBlock,
     PortBlock,
-    Other
+    Other,
+
+    /// <summary>
+    /// A rule the operator wrote in the Firewall Config view: any action, any
+    /// direction, a protocol, a port range and an address list. The other kinds
+    /// are minted by the app (auto-block, manual block, probe logging).
+    /// </summary>
+    Custom
 }
 
 public sealed class FirewallRuleInfo
 {
     public string Name { get; init; } = "";
+
+    /// <summary>
+    /// Operator-facing name for a Firewall Config rule (<c>block-inbound-ssh</c>).
+    /// Empty on rules the app minted itself, which fall back to a description
+    /// derived from what they match.
+    /// </summary>
+    public string Label { get; init; } = "";
+
     public string Description { get; init; } = "";
     public bool Enabled { get; init; }
     public bool IsBlock { get; init; }
@@ -1296,8 +1412,56 @@ public sealed class FirewallRuleInfo
     {
         FirewallRuleKind.IpBlock => "IP block",
         FirewallRuleKind.PortBlock => "Port block",
+        FirewallRuleKind.Custom => "Config rule",
         _ => "Rule"
     };
+
+    /// <summary>Only Firewall Config rules can be edited; the rest are app-minted.</summary>
+    public bool IsCustom => Kind == FirewallRuleKind.Custom;
+
+    public bool IsInbound => Direction != FirewallDirection.Outbound;
+
+    /// <summary>Label column: the operator's name, or a description of what the rule matches.</summary>
+    public string LabelText
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Label)) return Label;
+            return Kind switch
+            {
+                FirewallRuleKind.IpBlock => $"auto-block-{(IsInbound ? "inbound" : "outbound")}-{AddressText}",
+                FirewallRuleKind.PortBlock => $"block-{(IsInbound ? "inbound" : "outbound")}-port-{LocalPorts}",
+                _ => Name
+            };
+        }
+    }
+
+    /// <summary>Where the rule came from, so app-minted rules are not mistaken for config.</summary>
+    public string OriginText
+    {
+        get
+        {
+            if (string.Equals(Name, FirewallService.ProbeLogRuleName, StringComparison.OrdinalIgnoreCase))
+                return "Probe logging";
+
+            return Kind switch
+            {
+                FirewallRuleKind.IpBlock => "Auto/manual block",
+                FirewallRuleKind.PortBlock => "Port block",
+                FirewallRuleKind.Custom => "Firewall config",
+                _ => "Managed"
+            };
+        }
+    }
+
+    public string ProtocolText => string.IsNullOrWhiteSpace(Protocol) ? "Any" : Protocol;
+
+    public string PortRangeText => string.IsNullOrWhiteSpace(LocalPorts) ? "All ports" : LocalPorts;
+
+    /// <summary>Sources on an inbound rule, destinations on an outbound one.</summary>
+    public string AddressListText => string.IsNullOrWhiteSpace(RemoteAddresses)
+        ? FirewallRuleSpecs.AnyAddressText
+        : RemoteAddresses;
     /// <summary>Best-effort IP target for display (falls back to parsing the rule name).</summary>
     public string AddressText
     {

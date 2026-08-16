@@ -182,6 +182,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _authLogMonitorEnabled = _settings.AuthLogMonitorEnabled;
         _probeLogEnabled = _settings.ProbeLogEnabled;
         _allowlistUseRemoteFeed = _settings.AllowlistUseRemoteFeed;
+        _trafficMeterEnabled = _settings.TrafficMeterEnabled;
         _criticalAlertsEnabled = _settings.CriticalAlertsEnabled;
         _selectedMonitorPoll = PollMsToLabel(_settings.MonitorPollMs);
         _threatIntelEnabled = _settings.ThreatIntelEnabled;
@@ -219,6 +220,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         FirewallStatusText = _firewall.PrivilegeText;
         UpdateAutoBlockStatusText();
         RefreshFirewallRules();
+        InitializeFirewallConfig();
+        InitializeTraffic();
         _ = InitializeAllowlistAsync();
 
         _clockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
@@ -602,10 +605,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
         ShowThreats = SelectedNav == "Threats";
         ShowPorts = SelectedNav == "Ports";
         ShowFirewall = SelectedNav == "Firewall";
+        ShowFirewallConfig = SelectedNav == "FirewallConfig";
         ShowSettings = SelectedNav == "Settings";
 
         if (ShowFirewall)
             RefreshFirewallRules();
+        if (ShowFirewallConfig)
+            RefreshFirewallConfig();
         if (ShowSettings)
             RefreshMonitorStatusText();
     }
@@ -1619,6 +1625,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _clockTimer.Stop();
         _monitor.Updated -= OnMonitorUpdated;
         _monitor.ThreatsDetected -= OnThreatsDetected;
+        _traffic.Updated -= OnTrafficUpdated;
         PersistSettings();
         _duckDns.Dispose();
         _core.Dispose();

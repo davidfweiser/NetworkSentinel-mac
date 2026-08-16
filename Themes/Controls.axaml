@@ -93,6 +93,15 @@
     <Setter Property="Background" Value="#264A9EFF"/>
   </Style>
 
+  <!-- Submenu entry: indented under its parent nav item and a shade quieter,
+       so the sidebar reads as a hierarchy rather than a longer flat list. -->
+  <Style Selector="RadioButton.nav.sub">
+    <Setter Property="Padding" Value="30,9"/>
+    <Setter Property="FontSize" Value="12.5"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="Margin" Value="0,0,0,3"/>
+  </Style>
+
   <Style Selector="DataGrid">
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>

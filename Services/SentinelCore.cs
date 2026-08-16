@@ -21,6 +21,7 @@ public sealed class SentinelCore : IDisposable
     public FirewallService Firewall { get; } = new();
     public AllowlistService Allowlist { get; } = new();
     public PreventionService Prevention { get; }
+    public TrafficMeterService Traffic { get; } = new();
 
     public SentinelCore(AppSettings? settings = null)
     {
@@ -73,6 +74,12 @@ public sealed class SentinelCore : IDisposable
             _ = Task.Run(() => Firewall.EnableProbeLogging());
 
         Allowlist.UseRemoteFeed = Settings.AllowlistUseRemoteFeed;
+
+        // Independent of the monitor's poll loop: the byte counters are cumulative,
+        // so the meter's own cadence is what makes its deltas comparable, and it
+        // keeps recording while monitoring is paused.
+        if (Settings.TrafficMeterEnabled)
+            Traffic.Start();
     }
 
     /// <summary>0 (and anything negative) means auto-block rules never expire.</summary>
@@ -83,5 +90,6 @@ public sealed class SentinelCore : IDisposable
     {
         Monitor.Dispose();
         Allowlist.Dispose();
+        Traffic.Dispose();
     }
 }

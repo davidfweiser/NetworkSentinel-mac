@@ -11,7 +11,7 @@
     <RootNamespace>NetworkSentinel</RootNamespace>
     <Product>Network Sentinel</Product>
     <Description>macOS-native network port monitor and intrusion awareness console</Description>
-    <Version>0.6.2</Version>
+    <Version>0.7.0</Version>
     <!-- The test project lives in a subfolder; keep it out of the app's implicit compile glob. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);Tests/**</DefaultItemExcludes>
     <RuntimeIdentifiers>osx-arm64;osx-x64</RuntimeIdentifiers>
