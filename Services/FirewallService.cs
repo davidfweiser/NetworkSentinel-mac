@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using NetworkSentinel.Models;
 
@@ -54,13 +55,13 @@ public sealed class FirewallService
     public AllowlistService? Allowlist { get; set; }
 
     /// <summary>True when euid is root (GUI should normally not run as root).</summary>
-    public bool IsRoot
+    public bool IsRoot => IsRootProcess();
+
+    /// <summary>Static form, for the read path which has no instance to hand.</summary>
+    internal static bool IsRootProcess()
     {
-        get
-        {
-            try { return geteuid() == 0; }
-            catch { return false; }
-        }
+        try { return geteuid() == 0; }
+        catch { return false; }
     }
 
     /// <summary>True when firewall changes can be attempted (root or elevatable).</summary>
@@ -374,9 +375,9 @@ public sealed class FirewallService
     /// </summary>
     public FirewallOperationResult SaveCustomRule(FirewallRuleSpec spec, string? replaceName = null)
     {
-        var normalized = FirewallRuleSpecs.Normalize(spec);
-        var error = FirewallRuleSpecs.Validate(normalized);
-        if (error.Length > 0)
+        // Validate before normalising — see FirewallRuleSpecs.TryPrepare for why the
+        // other order turns an unparseable port range into "every port".
+        if (!FirewallRuleSpecs.TryPrepare(spec, out var normalized, out var error))
             return FirewallOperationResult.Fail(error);
 
         if (!IsAdministrator)
@@ -416,6 +417,66 @@ public sealed class FirewallService
         RemoveFromLedger(name);
         ApplyPfFromLedger();
         return FirewallOperationResult.Fail($"PF rejected the rule, so it was not kept: {applied.Message}");
+    }
+
+    /// <summary>
+    /// Deletes a rule that came from a host scan rather than this app's ledger.
+    /// The Firewall Config view lists the whole host firewall, so Delete has to
+    /// work on rows Network Sentinel did not write; refusing them all would make
+    /// the list a read-only report with buttons that lie.
+    ///
+    /// How far it can go differs by backend, and the difference is macOS's, not
+    /// ours. An Application Firewall entry is one app with one verdict, and
+    /// socketfilterfw removes it by path. A pf rule has no handle and no delete
+    /// verb — the ruleset is replaced wholesale by whatever loaded it, so
+    /// deleting one line means editing the file that declares it. Doing that to
+    /// /etc/pf.conf or an Apple anchor on an operator's behalf would put us in
+    /// the business of rewriting system configuration to remove a row from a
+    /// table, and a reload would bring it back anyway.
+    /// </summary>
+    public FirewallOperationResult DeleteHostRule(FirewallRuleInfo rule)
+    {
+        if (!IsAdministrator)
+            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+
+        // One of ours: go through the ledger so its bookkeeping stays truthful.
+        if (!rule.IsForeign || rule.Kind != FirewallRuleKind.Other)
+            return RemoveRule(rule.Name);
+
+        if (rule.Backend.Equals("alf", StringComparison.OrdinalIgnoreCase))
+            return RemoveAlfApp(rule);
+
+        // A rule in our own anchor is ours even when the scan could not match it to
+        // a ledger entry — rebuilding the anchor from the ledger drops it.
+        if (rule.Handle.Equals(PfAnchorName, StringComparison.OrdinalIgnoreCase))
+            return RemoveRule(rule.Name);
+
+        var where = rule.Handle.Length > 0
+            ? $"the “{rule.Handle}” anchor"
+            : (rule.Table.Length > 0 ? rule.Table : "the PF ruleset");
+
+        return FirewallOperationResult.Fail(
+            $"“{rule.LabelText}” is part of {where}, which PF loads as a whole — it has no rule handle to " +
+            "delete it by, and a reload would restore it. Remove it where it is declared.");
+    }
+
+    /// <summary>
+    /// Drops one binary from the Application Firewall's list. Unlike a pf rule
+    /// this is a supported single-item operation, so the Delete button means what
+    /// it says for these rows.
+    /// </summary>
+    private FirewallOperationResult RemoveAlfApp(FirewallRuleInfo rule)
+    {
+        var path = rule.Table;
+        if (path.Length == 0)
+            return FirewallOperationResult.Fail($"“{rule.LabelText}” carries no application path to remove.");
+
+        var result = RunPrivilegedShell(
+            $"{ShellQuote(HostFirewallScanner.SocketFilterFw)} --remove {ShellQuote(path)}");
+
+        return result.Success
+            ? FirewallOperationResult.Ok($"Removed “{rule.LabelText}” from the Application Firewall.")
+            : FirewallOperationResult.Fail($"The Application Firewall refused the delete: {result.Message}");
     }
 
     /// <summary>Rule names are the ledger key, so a repeated label gets a suffix.</summary>
@@ -623,15 +684,19 @@ public sealed class FirewallService
         // order decided precedence.
         foreach (var rule in live.Where(r => r.IsBlock && r.Kind != FirewallRuleKind.Custom))
         {
-            // Comment encodes rule name for remove-by-name and human debugging
+            // The comment names the rule in the file, for remove-by-name and for
+            // anyone reading it. The label is the same name inside the kernel:
+            // pfctl drops comments and keeps labels, so it is the only identity
+            // HostFirewallScanner can match back to this ledger entry on a rescan.
             sb.AppendLine($"# {rule.Name}");
+            var label = $" label \"{FirewallRuleSpecs.PfLabel(rule.Name)}\"";
             if (rule.Kind == FirewallRuleKind.IpBlock && !string.IsNullOrWhiteSpace(rule.RemoteAddresses))
             {
                 var ip = rule.RemoteAddresses.Trim();
                 if (rule.Direction == FirewallDirection.Inbound)
-                    sb.AppendLine($"block drop in quick from {ip} to any");
+                    sb.AppendLine($"block drop in quick from {ip} to any{label}");
                 else
-                    sb.AppendLine($"block drop out quick from any to {ip}");
+                    sb.AppendLine($"block drop out quick from any to {ip}{label}");
             }
             else if (rule.Kind == FirewallRuleKind.PortBlock &&
                      int.TryParse(rule.LocalPorts, out var port) &&
@@ -642,9 +707,9 @@ public sealed class FirewallService
                     proto = "tcp";
 
                 if (rule.Direction == FirewallDirection.Inbound)
-                    sb.AppendLine($"block drop in quick proto {proto} from any to any port {port}");
+                    sb.AppendLine($"block drop in quick proto {proto} from any to any port {port}{label}");
                 else
-                    sb.AppendLine($"block drop out quick proto {proto} from any port {port} to any");
+                    sb.AppendLine($"block drop out quick proto {proto} from any port {port} to any{label}");
             }
             sb.AppendLine();
         }
@@ -670,7 +735,7 @@ public sealed class FirewallService
         if (live.Any(r => string.Equals(r.Name, ProbeLogRuleName, StringComparison.OrdinalIgnoreCase)))
         {
             sb.AppendLine($"# {ProbeLogRuleName}");
-            sb.AppendLine("pass in log proto tcp from any to any flags S/SA no state");
+            sb.AppendLine($"pass in log proto tcp from any to any flags S/SA no state label \"{ProbeLogRuleName}\"");
             sb.AppendLine();
         }
 
@@ -1152,6 +1217,81 @@ public sealed class FirewallService
         }
     }
 
+    // ── Read-only command execution ──────────────────────────────────────
+    //
+    // HostFirewallScanner reads the live ruleset (`pfctl -sr`, the anchors,
+    // `socketfilterfw --listapps`, `lsof`). Those are inspections, not changes,
+    // so they must never raise the osascript admin dialog — a firewall view that
+    // asks for a password every refresh is a view nobody opens. The order is:
+    // try it as we are, then retry under `sudo -n`, which either works from
+    // cached/NOPASSWD credentials or fails immediately. Where both are denied
+    // the scanner falls back to the world-readable /etc/pf.conf and
+    // /etc/pf.anchors, and says so in the privilege note.
+
+    private const int ReadProcessTimeoutMs = 8_000;
+
+    /// <summary>Whether a read-only tool is present. Absolute paths are checked directly.</summary>
+    internal static bool ReadCommandExists(string path)
+        => path.StartsWith('/') ? File.Exists(path) : CommandExists(path);
+
+    /// <summary>
+    /// Runs a read-only command and returns its streams separately — unlike
+    /// <see cref="RunProcess"/>, which merges them, and would feed stderr into a
+    /// parser. Never elevates interactively.
+    /// </summary>
+    internal static (bool Ok, string StdOut, string StdErr) ReadCommand(string file, params string[] args)
+    {
+        var direct = ReadProcess(file, args);
+        if (direct.Ok && direct.StdOut.Trim().Length > 0) return direct;
+
+        // "pfctl: /dev/pf: Permission denied" as a normal user is the usual case;
+        // passwordless sudo is the one retry worth making.
+        if (!IsRootProcess())
+        {
+            var elevated = ReadProcess("/usr/bin/sudo", new[] { "-n", file }.Concat(args).ToArray());
+            if (elevated.Ok && elevated.StdOut.Trim().Length > 0) return elevated;
+        }
+
+        return direct;
+    }
+
+    private static (bool Ok, string StdOut, string StdErr) ReadProcess(string file, IReadOnlyList<string> args)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(file)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var arg in args) psi.ArgumentList.Add(arg);
+
+            using var p = Process.Start(psi);
+            if (p == null) return (false, "", $"Could not start {file}.");
+
+            // Both pipes drained concurrently — see RunProcessTimed for why reading
+            // one to EOF first deadlocks.
+            var stdoutTask = p.StandardOutput.ReadToEndAsync();
+            var stderrTask = p.StandardError.ReadToEndAsync();
+
+            if (!p.WaitForExit(ReadProcessTimeoutMs))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { /* already gone */ }
+                return (false, "", $"{file} did not finish within {ReadProcessTimeoutMs / 1000}s.");
+            }
+
+            return (p.ExitCode == 0,
+                    stdoutTask.GetAwaiter().GetResult(),
+                    stderrTask.GetAwaiter().GetResult());
+        }
+        catch (Exception ex)
+        {
+            return (false, "", ex.Message);
+        }
+    }
+
     private const int DefaultProcessTimeoutMs = 30_000;
 
     /// <summary>Paths that raise a password dialog include a human typing — allow minutes, not seconds.</summary>
@@ -1401,6 +1541,60 @@ public sealed class FirewallRuleInfo
     /// <summary>UTC time this rule stops applying (null = permanent). Set by auto-block expiry.</summary>
     public DateTime? ExpiresUtc { get; init; }
 
+    // ── Host-scan fields ─────────────────────────────────────────────────
+    //
+    // Set by HostFirewallScanner on rules read back out of the kernel, which is
+    // most of what the Firewall Config view lists: the pf.conf ruleset, Apple's
+    // anchors, the Application Firewall's per-app entries, and this app's own
+    // anchor. They are never persisted — the ledger holds only rules Network
+    // Sentinel wrote, and it already knows their shape.
+
+    /// <summary>
+    /// Which subsystem put the rule in force — "Network Sentinel", "macOS",
+    /// "Application Firewall", "Internet Sharing", "PF". Drives the Created by
+    /// column, so a foreign rule is never mistaken for one this app owns.
+    /// </summary>
+    [JsonIgnore] public string Origin { get; init; } = "";
+
+    /// <summary>
+    /// The PF anchor the rule lives in, empty for the main ruleset. Deleting a
+    /// rule means knowing which anchor holds it — pf has no rule handles, so the
+    /// anchor is as specific as an identifier gets.
+    /// </summary>
+    [JsonIgnore] public string Handle { get; init; } = "";
+
+    /// <summary>PF anchor path, or the ALF app path for an Application Firewall entry.</summary>
+    [JsonIgnore] public string Table { get; init; } = "";
+
+    /// <summary>Interface the rule is pinned to ("on en0"), empty when it matches every one.</summary>
+    [JsonIgnore] public string Chain { get; init; } = "";
+
+    /// <summary>Address family — <c>inet</c>, <c>inet6</c>, or empty for both.</summary>
+    [JsonIgnore] public string Family { get; init; } = "";
+
+    /// <summary>
+    /// True for a rule read out of the kernel that this app did not write. The
+    /// editor still opens it, but deletes route to whichever backend owns it.
+    /// </summary>
+    [JsonIgnore] public bool IsForeign { get; init; }
+
+    /// <summary>
+    /// Which subsystem holds the rule — "pf" or "alf". Deletes route on it: an
+    /// Application Firewall entry comes out through socketfilterfw, while a pf
+    /// rule belongs to whichever anchor file declares it.
+    /// </summary>
+    [JsonIgnore] public string Backend { get; init; } = "";
+
+    /// <summary>Verdict as PF words it: Pass, Drop, Reject.</summary>
+    [JsonIgnore] public string Verdict { get; init; } = "";
+
+    /// <summary>
+    /// The rule's own PF label, empty when it carries none. Distinct from
+    /// <see cref="Label"/>, which falls back to a minted name — an unnamed bare
+    /// pass in the main ruleset is plumbing, and only the label tells them apart.
+    /// </summary>
+    [JsonIgnore] public string Comment { get; init; } = "";
+
     public bool IsExpired => ExpiresUtc.HasValue && ExpiresUtc.Value <= DateTime.UtcNow;
 
     public string ExpiryText => ExpiresUtc.HasValue
@@ -1441,6 +1635,10 @@ public sealed class FirewallRuleInfo
     {
         get
         {
+            // A scanned rule already knows who wrote it; the ledger kinds below
+            // only describe rules this app minted.
+            if (!string.IsNullOrWhiteSpace(Origin)) return Origin;
+
             if (string.Equals(Name, FirewallService.ProbeLogRuleName, StringComparison.OrdinalIgnoreCase))
                 return "Probe logging";
 
@@ -1483,7 +1681,17 @@ public sealed class FirewallRuleInfo
         ? (string.IsNullOrWhiteSpace(RemoteAddresses) ? "—" : RemoteAddresses)
         : $"{Protocol}/{LocalPorts}";
     public string EnabledText => Enabled ? "On" : "Off";
-    public string ActionText => IsBlock ? "Block" : "Allow";
+    /// <summary>
+    /// Block, Allow — or Log, for a scanned <c>pass … log … no state</c> rule.
+    /// Calling that one "Allow" is technically true and practically a lie: this
+    /// app's own probe-log rule matches every TCP port, so the list would carry a
+    /// row reading "Allow · TCP · all ports · anywhere" that nobody wrote as a
+    /// permission. Only the scan sets <see cref="Verdict"/>, so ledger rules are
+    /// unaffected.
+    /// </summary>
+    public string ActionText => Verdict.Equals("Log", StringComparison.OrdinalIgnoreCase)
+        ? "Log"
+        : IsBlock ? "Block" : "Allow";
 }
 
 public sealed class FirewallOperationResult

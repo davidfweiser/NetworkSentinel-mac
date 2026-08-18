@@ -165,7 +165,7 @@ public class FirewallRuleSpecTests
     public void InboundBlockFiltersOnTheSourceAndTheLocalPort()
     {
         var line = FirewallRuleSpecs.BuildPfLine(Rule(Spec(addresses: "203.0.113.5")));
-        Assert.Equal("block drop in quick proto tcp from 203.0.113.5 to any port 22", line);
+        Assert.Equal("block drop in quick proto tcp from 203.0.113.5 to any port 22 label \"NetworkSentinel-Rule-test\"", line);
     }
 
     [Fact]
@@ -178,7 +178,7 @@ public class FirewallRuleSpecTests
             direction: FirewallRuleSpecs.DirectionOutbound,
             ports: "443",
             addresses: "198.51.100.7")));
-        Assert.Equal("pass out quick proto tcp from any to 198.51.100.7 port 443", line);
+        Assert.Equal("pass out quick proto tcp from any to 198.51.100.7 port 443 label \"NetworkSentinel-Rule-test\"", line);
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public class FirewallRuleSpecTests
     {
         var line = FirewallRuleSpecs.BuildPfLine(Rule(Spec(ports: "80, 443", addresses: "10.0.0.0/8, 192.168.1.5")));
         Assert.Equal(
-            "block drop in quick proto tcp from { 10.0.0.0/8, 192.168.1.5 } to any port { 80, 443 }",
+            "block drop in quick proto tcp from { 10.0.0.0/8, 192.168.1.5 } to any port { 80, 443 } label \"NetworkSentinel-Rule-test\"",
             line);
     }
 
@@ -194,14 +194,14 @@ public class FirewallRuleSpecTests
     public void AnyProtocolAndAnyAddressDropTheirClauses()
     {
         var line = FirewallRuleSpecs.BuildPfLine(Rule(Spec(protocol: "Any", ports: "", addresses: "")));
-        Assert.Equal("block drop in quick from any to any", line);
+        Assert.Equal("block drop in quick from any to any label \"NetworkSentinel-Rule-test\"", line);
     }
 
     [Fact]
     public void IcmpRuleCarriesNoPortClause()
     {
         var line = FirewallRuleSpecs.BuildPfLine(Rule(Spec(protocol: "ICMP", ports: "")));
-        Assert.Equal("block drop in quick proto icmp from any to any", line);
+        Assert.Equal("block drop in quick proto icmp from any to any label \"NetworkSentinel-Rule-test\"", line);
     }
 
     [Fact]
@@ -289,4 +289,70 @@ public class FirewallRuleSpecTests
         Assert.DoesNotContain("203.0.113.9", ruleset);
         Assert.DoesNotContain("port 22", ruleset);
     }
+
+    // ── Validate-before-normalise ────────────────────────────────────────
+
+    [Fact]
+    public void AnUnparseablePortRangeIsRejectedRatherThanTurnedIntoEveryPort()
+    {
+        // Normalize re-renders the port field from what parsed and drops what did
+        // not, and an empty port field means EVERY port. Validating the normalized
+        // spec therefore accepted "block 443-80" and armed a catch-all block.
+        var typed = Spec(ports: "443-80");
+
+        Assert.False(FirewallRuleSpecs.TryPrepare(typed, out _, out var error));
+        Assert.Contains("starts after it ends", error);
+
+        // The shape of the bug, pinned so it cannot come back: normalising first
+        // really does produce a catch-all that passes validation.
+        var normalizedFirst = FirewallRuleSpecs.Normalize(typed);
+        Assert.Equal("", normalizedFirst.PortRange);
+        Assert.True(FirewallRuleSpecs.IsCatchAll(normalizedFirst));
+        Assert.Equal("", FirewallRuleSpecs.Validate(normalizedFirst));
+    }
+
+    [Fact]
+    public void AnUnparseableAddressIsRejectedRatherThanWidenedToEveryAddress()
+    {
+        Assert.False(FirewallRuleSpecs.TryPrepare(Spec(addresses: "not-an-ip"), out _, out var error));
+        Assert.Contains("Invalid address", error);
+    }
+
+    [Fact]
+    public void TryPrepareReturnsTheCanonicalFormWhenTheInputIsGood()
+    {
+        Assert.True(FirewallRuleSpecs.TryPrepare(
+            Spec(action: "block", protocol: "tcp", ports: "8000-8001"), out var spec, out var error));
+
+        Assert.Equal("", error);
+        Assert.Equal(FirewallRuleSpecs.ActionBlock, spec.Action);
+        Assert.Equal("TCP", spec.Protocol);
+        Assert.Equal("8000-8001", spec.PortRange);
+        Assert.False(FirewallRuleSpecs.IsCatchAll(spec));
+    }
+
+    [Fact]
+    public void TheRuleCarriesItsLedgerNameAsAPfLabel()
+    {
+        // pfctl keeps a label and drops the comment above the rule, so the label is
+        // the only identity that survives being read back out of the anchor — and
+        // without it a rescanned rule cannot be matched to the ledger entry that
+        // owns it, which is what Delete and Edit act on.
+        var line = FirewallRuleSpecs.BuildPfLine(Rule(Spec()));
+
+        Assert.EndsWith(" label \"NetworkSentinel-Rule-test\"", line);
+    }
+
+    [Fact]
+    public void ALabelCannotEndItsOwnQuotedString()
+    {
+        var rule = FirewallRuleSpecs.ToRule(Spec(), "odd\"name");
+
+        Assert.Equal("oddname", FirewallRuleSpecs.PfLabel(rule.Name));
+        Assert.DoesNotContain("odd\"name", FirewallRuleSpecs.BuildPfLine(rule));
+    }
+
+    [Fact]
+    public void ALabelIsTruncatedToWhatPfCanHold()
+        => Assert.Equal(63, FirewallRuleSpecs.PfLabel(new string('x', 200)).Length);
 }

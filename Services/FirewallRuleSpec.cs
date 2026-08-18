@@ -216,6 +216,29 @@ public static class FirewallRuleSpecs
         };
     }
 
+    /// <summary>
+    /// Validate what the operator typed, then canonicalise it. Order matters, and
+    /// getting it backwards is dangerous rather than merely wrong:
+    /// <see cref="Normalize"/> re-renders the port and address fields from what
+    /// parsed and drops what did not, so a typo'd range like <c>443-80</c> comes
+    /// out as an empty port field — and an empty port field means *every port*.
+    /// Validating the normalized spec would therefore accept "block 443-80" and
+    /// quietly write "block everything".
+    /// </summary>
+    /// <returns>True when the rule is usable, with <paramref name="normalized"/> set.</returns>
+    public static bool TryPrepare(FirewallRuleSpec input, out FirewallRuleSpec normalized, out string error)
+    {
+        error = Validate(input);
+        if (error.Length > 0)
+        {
+            normalized = input;
+            return false;
+        }
+
+        normalized = Normalize(input);
+        return true;
+    }
+
     /// <summary>Empty string when the spec is usable; the reason when it is not.</summary>
     public static string Validate(FirewallRuleSpec spec)
     {
@@ -398,7 +421,25 @@ public static class FirewallRuleSpecs
         if (TryParsePorts(rule.LocalPorts, out var ports, out _) && ports.Count > 0)
             sb.Append(" port ").Append(PfList(ports));
 
+        // The ledger key, stamped into the kernel. pfctl keeps a rule's label and
+        // drops the comment above it, so this is the only thing that survives a
+        // round trip — and HostFirewallScanner needs it to tell this app's rules
+        // apart from the rest of the host's when it reads the anchor back.
+        var label = PfLabel(rule.Name);
+        if (label.Length > 0)
+            sb.Append(" label \"").Append(label).Append('"');
+
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// A rule name as PF will accept it in a <c>label</c>: no quote or backslash
+    /// to end the string early, and inside PF's 63-character label buffer.
+    /// </summary>
+    internal static string PfLabel(string? name)
+    {
+        var cleaned = new string((name ?? "").Where(c => c is not ('"' or '\\') && !char.IsControl(c)).ToArray()).Trim();
+        return cleaned.Length > 63 ? cleaned[..63] : cleaned;
     }
 
     /// <summary>PF takes a bare token or a braced list; "any" when there is nothing to match.</summary>

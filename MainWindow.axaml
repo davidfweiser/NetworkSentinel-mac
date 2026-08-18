@@ -635,6 +635,8 @@
                 <TextBlock Text="Firewall configuration" FontWeight="Bold" FontSize="15"/>
                 <TextBlock Text="{Binding FirewallConfigSummary}" Margin="0,4,0,0" FontSize="12"
                            Foreground="{DynamicResource AccentCyanBrush}" TextWrapping="Wrap"/>
+                <TextBlock Text="{Binding FirewallConfigListenerText}" Margin="0,4,0,0" FontSize="12"
+                           Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap"/>
                 <TextBlock Text="{Binding FirewallConfigPolicyText}" Margin="0,6,16,0" FontSize="11.5"
                            Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap"/>
                 <TextBlock Text="{Binding FirewallConfigMessage}" Margin="0,6,0,0" FontSize="12"
@@ -645,8 +647,12 @@
                         Command="{Binding AddInboundRuleCommand}"/>
                 <Button Classes="ghost" Content="Add an Outbound Rule" MinWidth="180"
                         Command="{Binding AddOutboundRuleCommand}"/>
-                <Button Classes="ghost" Content="Refresh" MinWidth="180"
-                        Command="{Binding RefreshFirewallConfigCommand}"/>
+                <Button Classes="ghost" Content="Rescan the host firewall" MinWidth="180"
+                        Command="{Binding RefreshFirewallConfigCommand}"
+                        ToolTip.Tip="Re-reads the PF ruleset, the Application Firewall and the listening sockets"/>
+                <TextBlock Text="Scanning…" FontSize="11" HorizontalAlignment="Right"
+                           IsVisible="{Binding IsFirewallConfigScanning}"
+                           Foreground="{DynamicResource AccentCyanBrush}"/>
               </StackPanel>
             </Grid>
           </Border>
@@ -718,9 +724,9 @@
             </StackPanel>
           </Border>
 
-          <!-- MinHeight, not a fixed height: the two lists share whatever the window
+          <!-- MinHeight, not a fixed height: the lists share whatever the window
                leaves them, but never shrink to a single row when the editor is open. -->
-          <Grid Grid.Row="2" RowDefinitions="*,*">
+          <Grid Grid.Row="2" RowDefinitions="*,*,Auto">
             <Border Classes="card" Margin="0,0,0,12" MinHeight="230">
               <DockPanel>
                 <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,10">
@@ -760,7 +766,7 @@
               </DockPanel>
             </Border>
 
-            <Border Classes="card" Grid.Row="1" MinHeight="230">
+            <Border Classes="card" Grid.Row="1" MinHeight="230" Margin="0,0,0,12">
               <DockPanel>
                 <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,10">
                   <StackPanel>
@@ -794,6 +800,29 @@
                         </DataTemplate>
                       </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </DockPanel>
+            </Border>
+
+            <!-- What is listening, and what the rules above do to it. A rule list on
+                 its own does not answer "is this port actually reachable" — the two
+                 together do, which is the pairing FireWallConfig shows. -->
+            <Border Classes="card" Grid.Row="2" MinHeight="200">
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                  <TextBlock Text="Listening services" FontWeight="Bold" FontSize="15"/>
+                  <TextBlock Text="{Binding FirewallConfigListenerText}" FontSize="11.5" Margin="0,2,0,0"
+                             Foreground="{DynamicResource TextSecondaryBrush}"/>
+                </StackPanel>
+                <DataGrid ItemsSource="{Binding ListeningServices}" AutoGenerateColumns="False">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*"/>
+                    <DataGridTextColumn Header="Protocol" Binding="{Binding Protocol}" Width="95"/>
+                    <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="80"/>
+                    <DataGridTextColumn Header="Service" Binding="{Binding ServiceName}" Width="150"/>
+                    <DataGridTextColumn Header="Bind address" Binding="{Binding Address}" Width="170"/>
+                    <DataGridTextColumn Header="Firewall" Binding="{Binding Covered}" Width="120"/>
                   </DataGrid.Columns>
                 </DataGrid>
               </DockPanel>

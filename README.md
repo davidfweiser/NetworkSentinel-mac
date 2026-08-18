@@ -4,7 +4,7 @@ Native **macOS** desktop app for **live network monitoring**, **data-flow meteri
 
 > **Host-based** intrusion detection and prevention. It detects on its own heuristics and, with Suricata attached (0.6.x), on signature/payload inspection — then enforces in the kernel via **PF**. It is not an inline network appliance: it protects the Mac it runs on, not a segment, and it does not sit in the forwarding path.
 
-macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.0**.
+macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.3**.
 
 ---
 
@@ -22,7 +22,7 @@ macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/Net
 
 ### Data-flow metering (0.7.0)
 
-The dashboard answers "how much data went in and out?" as well as "who is talking to this Mac?". Three cards, all fed by one meter:
+The dashboard answers "how much data went in and out?" as well as "who is talking to this Mac?". Three cards, all fed by one meter, on **the GUI dashboard and the web console** (the console got them in 0.7.1):
 
 | Card | What it shows |
 |------|----------------|
@@ -143,14 +143,15 @@ Full setup is under [HTTPS and remote access](#https-and-remote-access-050) belo
 ### Firewall & block
 - **Block / unblock** remote IPs (inbound, outbound, or both)
 - **Block local ports** (TCP/UDP)
-- Dedicated **PF anchor** `com.networksentinel` (only manages its own rules)
+- Dedicated **PF anchor** `com.networksentinel` — the only ruleset this app writes to
+- Only *manages* rules of its own: auto-block, manual blocks and expiry never touch anything else. Since 0.7.3 the Firewall Config page also **shows the rest of the host firewall** — the pf ruleset, Apple's anchors and the Application Firewall — but nothing automatic acts on a foreign rule
 - Block rules are created as an `-In`/`-Out` pair and **removed together** in one click
 - **Auto-block** on/off with minimum severity (`Medium` / `High` / `Critical`), run through one prevention engine shared by all three front-ends — see [Auto-block](#auto-block)
 - **Dry run** — decide and report what would be blocked without writing a single PF rule
 - Settings in `~/Library/Application Support/NetworkSentinel/settings.json`
 - **Authorize firewall** — elevates only `pfctl` via Mac admin password dialog. The GUI always runs as your user
 
-### Firewall configuration (0.7.0)
+### Firewall configuration (0.7.0, rebuilt in 0.7.3)
 
 **Firewall Config**, a submenu under **Firewall & Block**, is where rules are written by hand — add, edit and delete inbound and outbound rules, laid out the way the Linode Cloud Manager firewall page lays them out and the way [FireWallConfig](https://github.com/davidfweiser/FireWallConfig) does on Ubuntu: one list per direction, columns for **Label · Action · Protocol · Port range · Sources**, and one form that both creates and edits.
 
@@ -166,7 +167,34 @@ Full setup is under [HTTPS and remote access](#https-and-remote-access-050) belo
 
 Rules land in the same PF anchor and the same `firewall-rules.json` ledger as everything else the app blocks, so they survive a restart and are re-applied by the [startup reconciliation](#auto-block).
 
-**What the view is careful to say.** macOS PF passes anything no rule matches, so an **Allow** rule opens a path *through the rules above it* — it does not grant access on its own, and this page says so rather than implying a deny-by-default firewall that is not there.
+**Since 0.7.3 the page reads the whole host firewall, not just this app's ledger.** Until then it listed only rules Network Sentinel had written itself, which is a near-empty page beside the two firewalls macOS actually runs. One machine has one firewall; the page now shows all of it, named after the host:
+
+| Source | Read with |
+|---|---|
+| **PF status and rules** | `pfctl -si`, `pfctl -sr` — whether PF is enabled, and every rule in the main ruleset |
+| **PF anchors** | `pfctl -sA`, then `pfctl -a NAME -sr` for each — Apple's `com.apple/*` anchors, Internet Sharing, and our own |
+| **PF without root** | `/etc/pf.conf` and `/etc/pf.anchors/*` — world-readable, and where `com.networksentinel` keeps our rules |
+| **Application Firewall** | `socketfilterfw --getglobalstate`, `--getblockall`, `--listapps` — the per-app firewall from System Settings |
+| **Listeners** | `lsof -nP -iTCP -sTCP:LISTEN` and `-iUDP`, falling back to `netstat -an` |
+
+**Both firewalls, one list.** macOS runs two and they answer different questions: PF filters packets by address and port, while the Application Firewall decides which *binaries* may accept incoming connections. Reading only one leaves the other invisible. Loopback rules and the bare `pass all` every permissive ruleset opens with are folded out, so the list is rules somebody chose; everything else stays, each named in a **Created by** column — `macOS`, `AirDrop`, `Internet Sharing`, `Application Firewall`, `Network Sentinel` — so a foreign rule is never mistaken for one this app is responsible for.
+
+**The reads never ask for your password.** `pfctl` needs root to open `/dev/pf`, but a firewall view that raises an admin dialog every refresh is a view nobody opens. So the scan runs as you, retries once under `sudo -n`, and otherwise falls back to `/etc/pf.conf` and `/etc/pf.anchors` — which still carries this app's own rules, because that is where they are written. The policy line says which of those happened, so a short list reads as a privilege problem rather than an empty firewall.
+
+**Listening services.** Under the two rule lists, what is actually listening with the verdict the rules above pass on it: **Open** (reachable from anywhere), **Restricted** (admitted, but only from named addresses), **Local only** (bound to loopback), **Not allowed** (listening into a closed door), **No firewall**. A rule list on its own does not answer "is this port reachable"; the two together do. Note that unprivileged `lsof` only sees your own processes — another reason the privilege line matters.
+
+> The app's own probe-log rule is `pass in log … no state`, which matches every TCP port in order to see SYNs to closed ones. It is listed as **Log** rather than Allow, and it is not counted as an admission — otherwise turning closed-port scan detection on would mark every port on the Mac "Open".
+
+**Writes still go into our own anchor**, which is the only ruleset this app owns. `/etc/pf.conf` and the Apple anchors are loaded whole, so a line written into one would be undone by the next reload. Deleting works on rows this app wrote and on **Application Firewall** entries (`socketfilterfw --remove`, a supported per-app operation); a pf rule belonging to `pf.conf` or an Apple anchor is refused with the reason, because pf has no rule handle to delete by and a reload would restore it anyway. Editing a foreign rule deletes it where it lives and rewrites it — PF has no in-place edit — and if the delete fails the save stops rather than leaving both rules in force.
+
+**Rules this app writes carry their ledger name as a PF `label`**, which is how a rescan tells them apart from the
+rest of the host's. It has to be the label rather than the `# name` comment above the rule: `pfctl` keeps labels and
+drops comments, so the comment is for whoever reads the anchor file and the label is the identity that survives into
+the kernel — without it, Delete and Edit on those rows would have nothing to act on.
+
+**The scan is cached.** The web console polls `/api/state` every 2.5 s, and shelling out to `pfctl`, `socketfilterfw` and `lsof` that often would be absurd; the **Rescan the host firewall** button forces a fresh read, and any write invalidates the cache.
+
+**What the view is careful to say.** The page states the **real** default policies it read off the machine and words the consequence to match. macOS PF passes anything no rule matches, so on a stock Mac an **Allow** rule opens a path *through the rules above it* rather than granting access on its own; where a catch-all block or the Application Firewall's block-all is in force, it says instead that a service is only reachable if a rule admits it.
 
 **Precedence is fixed, not incidental.** Every rule is written `quick`, so the anchor is first-match-wins. Blocks minted by auto-block and the Firewall page are emitted **first**, then config rules in list order. A config *Allow* rule therefore cannot reopen an address auto-block just shut — which is exactly what would happen if ledger insertion order decided precedence.
 
@@ -242,19 +270,36 @@ dotnet run -c Release -- -w 18765    # explicit port
 # or:  NETWORKSENTINEL_WEB=1 ./NetworkSentinel
 ```
 
+#### Layout (0.7.3)
+
+The console is laid out like the desktop window, because they are the same product and the menus should not be a
+different shape in each: a **230 px navigation rail** on the left carrying the desktop's menu names and hierarchy —
+Firewall Config and Allowlist indented under **Firewall & Block**, Help under **Settings** — with a **STATUS** block
+pinned to its foot (monitor state, firewall privilege, and the **Enable auto-block** checkbox with the engine's own
+wording under it). To the right, the same hero header the desktop carries: clock, **Network Defense Console**, the
+`high/critical · blocked · auto-block` subtitle built from the same three numbers, and the action row. Below ~900 px
+the rail folds into a wrapping row above the content.
+
 | Tab | What you can do |
 |-----|-----------------|
-| **Dashboard** | Live counters, **5-minute activity chart** (connections + threat markers), monitoring/firewall status, recent threats |
-| **Connections / Threats** | Live traffic with a **Block** button on every row |
-| **Hosts** | Remote peers; block / unblock by row or by typed IP |
-| **Ports** | Local listeners; one-click **Block port** |
-| **Firewall** | Managed rules grouped as In/Out pairs; manual IP and port blocking; **Restore allowlisted** |
+| **Dashboard** | Live counters, **5-minute activity chart** (connections + threat markers), **data-flow charts** (0.7.1), monitoring/firewall status, recent threats |
+| **Live Connections / Break-in Attempts** | Live traffic with a **Block** button on every row |
+| **Remote Computers** | Remote peers; block / unblock by row or by typed IP |
+| **Open Ports** | Local listeners; one-click **Block port** |
+| **Firewall & Block** | Managed rules grouped as In/Out pairs; manual IP and port blocking; **Restore allowlisted** |
+| **Firewall Config** (0.7.1, rebuilt 0.7.3) | The whole host firewall — the pf ruleset, Apple's anchors, the Application Firewall and Network Sentinel's own rules — plus listening services and their firewall verdict; add / edit / delete |
 | **Allowlist** | Add/remove trusted domains and IPs; refresh the feed |
 | **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **Suricata alerts**, **WireGuard peer watch**, **PF flow events**, **DNS hygiene**, **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity + **dry run**, block direction, allowlist feed, **change master password**, **Remove all rules** |
 
+The navigation rail shows the running version (e.g. `v0.7.3`) — check it after an upgrade to confirm the new build
+is live. Since 0.7.2 the console notices this for you: a tab left open across an upgrade shows a banner naming both
+versions and offering a reload, because the page polls `/api/state` but never re-requests its own HTML, so the old UI
+would otherwise stay put and look like the upgrade never installed. It never reloads on its own — you may be
+mid-rule in the Firewall Config form.
+
 #### Sleep / Wake
 
-The first button in the web console header is a single **Sleep ⇄ Wake** toggle:
+The first button in the web console's hero action row is a single **Sleep ⇄ Wake** toggle:
 
 - **Sleep** stops *everything the console watches* — the connection/port poll plus the auth-log, closed-port probe, ARP, launch-item, exfiltration and honeypot watchers — and parks the page: the live tabs dim, a banner explains the state, and the browser drops its 2.5-second refresh so a sleeping console costs nothing on either end
 - **Wake** starts monitoring again from live data and restores the normal refresh
@@ -359,8 +404,8 @@ Self-contained (no system .NET runtime needed):
 `package.sh` produces `dist/networksentinel-<version>-<rid>.tar.gz` plus a ready `dist/Network Sentinel.app` you can drag to Applications. To install from the tarball on a Mac with no .NET:
 
 ```bash
-tar xzf networksentinel-0.7.0-osx-arm64.tar.gz
-cd networksentinel-0.7.0-osx-arm64
+tar xzf networksentinel-0.7.3-osx-arm64.tar.gz
+cd networksentinel-0.7.3-osx-arm64
 sudo ./install.sh                        # /Applications + /usr/local/bin
 ./install.sh --user                      # ~/Applications + ~/.local/bin, no root
 sudo ./install.sh --desktop-shortcut     # also drop a shortcut on the Desktop

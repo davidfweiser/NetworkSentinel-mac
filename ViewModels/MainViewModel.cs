@@ -611,7 +611,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         if (ShowFirewall)
             RefreshFirewallRules();
         if (ShowFirewallConfig)
-            RefreshFirewallConfig();
+            _ = RefreshFirewallConfigAsync();
         if (ShowSettings)
             RefreshMonitorStatusText();
     }
