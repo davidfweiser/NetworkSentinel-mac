@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using NetworkSentinel.Services;
@@ -175,6 +176,53 @@ public partial class MainViewModel
 
     [RelayCommand]
     private void AddOutboundRule() => OpenRuleEditor(null, FirewallRuleSpecs.DirectionOutbound);
+
+    /// <summary>
+    /// Starts an inbound rule from a row of the listening-services list — those
+    /// sockets are what a rule on this page is written against, so the page shows
+    /// them rather than making you read them off <c>lsof -nP -iTCP -sTCP:LISTEN</c>
+    /// in a terminal.
+    ///
+    /// Protocol and port carry over; the bind address deliberately does not.
+    /// Sources matches the far end of a connection, so seeding it with 0.0.0.0,
+    /// ::, or this Mac's own LAN address would produce a rule that matches
+    /// nothing an attacker sends.
+    ///
+    /// A listener whose port is not a plain number (a socket the scan could only
+    /// label) has nothing to prefill, so the command declines rather than opening
+    /// a form with an unparseable port in it.
+    /// </summary>
+    [RelayCommand]
+    private void NewRuleForListener(HostListener? listener)
+    {
+        if (listener == null) return;
+        if (!int.TryParse(listener.Port, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
+        {
+            FirewallConfigMessage =
+                $"“{listener.Port}” is not a single port number, so there is nothing to prefill — " +
+                "write the rule by hand with Add an Inbound Rule.";
+            return;
+        }
+
+        OpenRuleEditor(null, FirewallRuleSpecs.DirectionInbound);
+        RuleProtocol = listener.Protocol.Equals("UDP", StringComparison.OrdinalIgnoreCase) ? "UDP" : "TCP";
+        RulePortRange = port.ToString(CultureInfo.InvariantCulture);
+        RuleEditorNote =
+            $"Writes a rule for {RuleProtocol} port {port}, which {DescribeListener(listener)} is listening on. " +
+            "Sources is left empty (every address) — it matches the remote end, not the address the " +
+            "service is bound to. Applying asks for your Mac password.";
+    }
+
+    private static string DescribeListener(HostListener listener)
+    {
+        var name = string.IsNullOrWhiteSpace(listener.Process) || listener.Process == "—"
+            ? "an unidentified process"
+            : listener.Process;
+        var where = string.IsNullOrWhiteSpace(listener.Address)
+            ? $"port {listener.Port}"
+            : $"{listener.Address}:{listener.Port}";
+        return $"{name} on {where}";
+    }
 
     /// <summary>
     /// The rule being edited when it did not come from this app's ledger. PF has

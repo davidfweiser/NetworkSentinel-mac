@@ -533,4 +533,28 @@ pass in log proto tcp all flags S/SA no state label "NetworkSentinel-ProbeLog"
         Assert.Equal("203.0.113.9", rule.RemoteAddresses);
         Assert.True(rule.IsBlock);
     }
+
+    [Fact]
+    public void AnUnreadableFirewallStillReportsWhatIsListening()
+    {
+        // A Mac with PF off and the Application Firewall never switched on reads
+        // back no firewall state at all — but lsof still answers, and that is the
+        // machine where "what is listening here" matters most. Dropping the
+        // listeners emptied the table on exactly those hosts.
+        var listeners = new[]
+        {
+            new HostListener { Protocol = "TCP", Address = "0.0.0.0", Port = "22", Process = "sshd" }
+        };
+
+        var scan = HostFirewallSnapshot.Unreadable("Nothing readable.", errors: null, listeners: listeners);
+
+        Assert.Equal("none", scan.Backend);
+        Assert.Equal("22", Assert.Single(scan.Listeners).Port);
+    }
+
+    [Fact]
+    public void AnUnreadableFirewallWithNoListenersIsStillEmptyRatherThanNull()
+    {
+        Assert.Empty(HostFirewallSnapshot.Unreadable("Nothing readable.").Listeners);
+    }
 }

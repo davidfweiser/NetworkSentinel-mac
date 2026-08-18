@@ -69,13 +69,22 @@ public sealed class HostFirewallSnapshot
     /// <summary>Inbound rules that admit traffic — the ports genuinely open.</summary>
     public IReadOnlyList<FirewallRuleInfo> OpenPorts => Inbound.Where(r => !r.IsBlock).ToList();
 
-    public static HostFirewallSnapshot Unreadable(string note, IReadOnlyList<string>? errors = null) => new()
+    /// <summary>
+    /// No firewall state, but not necessarily no knowledge: lsof reports at least
+    /// this user's own sockets with no elevation at all, so a caller that got that
+    /// far passes the listeners in rather than throwing them away.
+    /// </summary>
+    public static HostFirewallSnapshot Unreadable(
+        string note,
+        IReadOnlyList<string>? errors = null,
+        IReadOnlyList<HostListener>? listeners = null) => new()
     {
         HostLabel = Environment.MachineName,
         Backend = "none",
         Status = "Unknown",
         Description = "No PF ruleset or Application Firewall state could be read.",
         PrivilegeNote = note,
+        Listeners = listeners ?? Array.Empty<HostListener>(),
         Errors = errors ?? Array.Empty<string>()
     };
 }
@@ -206,8 +215,16 @@ public sealed class HostFirewallScanner
         var note = PrivilegeNote();
         if (backend == "none")
         {
+            // Hand the listeners over. lsof reports at least this user's own
+            // sockets without any elevation, so a Mac whose firewall could not be
+            // read still knows what is listening on it — and "nothing readable" is
+            // the case where that matters most: an unprivileged run, or a Mac with
+            // PF off and the Application Firewall never switched on. This used to
+            // drop them, which emptied the listening-services table on exactly
+            // those machines.
             return HostFirewallSnapshot.Unreadable(
-                "Neither PF nor the Application Firewall returned any state. " + note, errors);
+                "Neither PF nor the Application Firewall returned any state. " + note,
+                errors, listeners);
         }
 
         return new HostFirewallSnapshot

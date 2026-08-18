@@ -70,6 +70,14 @@ public partial class MainWindow : Window
         {
             ApplyTrayFromViewModel(vm);
         }
+
+        // The rule editor sits above the lists, so "New rule" on a listener row near
+        // the bottom of a scrolled page would otherwise fill in a form the operator
+        // cannot see and read as a button that did nothing. Posted, not called: the
+        // Border is still collapsed at the moment IsVisible flips, and a control with
+        // no layout slot cannot be scrolled to.
+        if (e.PropertyName == nameof(MainViewModel.IsRuleEditorOpen) && vm.IsRuleEditorOpen)
+            Dispatcher.UIThread.Post(() => RuleEditorCard?.BringIntoView(), DispatcherPriority.Loaded);
     }
 
     private void SetupTray()

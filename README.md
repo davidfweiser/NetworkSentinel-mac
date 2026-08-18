@@ -4,7 +4,7 @@ Native **macOS** desktop app for **live network monitoring**, **data-flow meteri
 
 > **Host-based** intrusion detection and prevention. It detects on its own heuristics and, with Suricata attached (0.6.x), on signature/payload inspection — then enforces in the kernel via **PF**. It is not an inline network appliance: it protects the Mac it runs on, not a segment, and it does not sit in the forwarding path.
 
-macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.3**.
+macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.4**.
 
 ---
 
@@ -151,7 +151,7 @@ Full setup is under [HTTPS and remote access](#https-and-remote-access-050) belo
 - Settings in `~/Library/Application Support/NetworkSentinel/settings.json`
 - **Authorize firewall** — elevates only `pfctl` via Mac admin password dialog. The GUI always runs as your user
 
-### Firewall configuration (0.7.0, rebuilt in 0.7.3)
+### Firewall configuration (0.7.0, rebuilt in 0.7.3, listener actions in 0.7.4)
 
 **Firewall Config**, a submenu under **Firewall & Block**, is where rules are written by hand — add, edit and delete inbound and outbound rules, laid out the way the Linode Cloud Manager firewall page lays them out and the way [FireWallConfig](https://github.com/davidfweiser/FireWallConfig) does on Ubuntu: one list per direction, columns for **Label · Action · Protocol · Port range · Sources**, and one form that both creates and edits.
 
@@ -182,6 +182,10 @@ Rules land in the same PF anchor and the same `firewall-rules.json` ledger as ev
 **The reads never ask for your password.** `pfctl` needs root to open `/dev/pf`, but a firewall view that raises an admin dialog every refresh is a view nobody opens. So the scan runs as you, retries once under `sudo -n`, and otherwise falls back to `/etc/pf.conf` and `/etc/pf.anchors` — which still carries this app's own rules, because that is where they are written. The policy line says which of those happened, so a short list reads as a privilege problem rather than an empty firewall.
 
 **Listening services.** Under the two rule lists, what is actually listening with the verdict the rules above pass on it: **Open** (reachable from anywhere), **Restricted** (admitted, but only from named addresses), **Local only** (bound to loopback), **Not allowed** (listening into a closed door), **No firewall**. A rule list on its own does not answer "is this port reachable"; the two together do. Note that unprivileged `lsof` only sees your own processes — another reason the privilege line matters.
+
+**Since 0.7.4, each listener row carries a New rule button**, in the GUI and the web console, which opens the editor above with that socket's protocol and port already in it — the alternative is reading the port off `lsof` in a terminal and retyping it, which is how ports go into a rule set wrong. **Sources is deliberately left empty**: it matches the remote end of a connection, so seeding it with the socket's own bind address (`0.0.0.0`, `::`, this Mac's LAN address) would write a rule that matches nothing an attacker sends. A row whose port is not a plain number has nothing to prefill and says so rather than opening a form with an unparseable port in it. The editor sits above the lists, so opening it from a row near the bottom of a scrolled page scrolls it into view — otherwise the button reads as one that did nothing.
+
+**The list survives a firewall it cannot read** (0.7.4). Listeners come from `lsof`, which reports your own sockets with no elevation at all, but the scan used to throw them away whenever neither PF nor the Application Firewall returned any state — emptying the table on exactly the Macs where it matters most: an unprivileged run, or a Mac with PF off and the Application Firewall never switched on. The verdict column reads **No firewall** there, which is the answer.
 
 > The app's own probe-log rule is `pass in log … no state`, which matches every TCP port in order to see SYNs to closed ones. It is listed as **Log** rather than Allow, and it is not counted as an admission — otherwise turning closed-port scan detection on would mark every port on the Mac "Open".
 
@@ -287,11 +291,11 @@ the rail folds into a wrapping row above the content.
 | **Remote Computers** | Remote peers; block / unblock by row or by typed IP |
 | **Open Ports** | Local listeners; one-click **Block port** |
 | **Firewall & Block** | Managed rules grouped as In/Out pairs; manual IP and port blocking; **Restore allowlisted** |
-| **Firewall Config** (0.7.1, rebuilt 0.7.3) | The whole host firewall — the pf ruleset, Apple's anchors, the Application Firewall and Network Sentinel's own rules — plus listening services and their firewall verdict; add / edit / delete |
+| **Firewall Config** (0.7.1, rebuilt 0.7.3) | The whole host firewall — the pf ruleset, Apple's anchors, the Application Firewall and Network Sentinel's own rules — plus listening services and their firewall verdict; add / edit / delete, and (0.7.4) **New rule** on a listener row to start one prefilled from that socket |
 | **Allowlist** | Add/remove trusted domains and IPs; refresh the feed |
 | **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **Suricata alerts**, **WireGuard peer watch**, **PF flow events**, **DNS hygiene**, **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity + **dry run**, block direction, allowlist feed, **change master password**, **Remove all rules** |
 
-The navigation rail shows the running version (e.g. `v0.7.3`) — check it after an upgrade to confirm the new build
+The navigation rail shows the running version (e.g. `v0.7.4`) — check it after an upgrade to confirm the new build
 is live. Since 0.7.2 the console notices this for you: a tab left open across an upgrade shows a banner naming both
 versions and offering a reload, because the page polls `/api/state` but never re-requests its own HTML, so the old UI
 would otherwise stay put and look like the upgrade never installed. It never reloads on its own — you may be
@@ -378,7 +382,7 @@ The token is stored in `~/Library/Application Support/NetworkSentinel/duckdns.js
 dotnet test Tests/NetworkSentinel.Tests
 ```
 
-180 xunit tests covering the pure-logic seams the enforcement path depends on: IP normalization (port stripping, zone ids, IPv4-mapped collapse), the non-public/CGNAT range boundaries, atomic writes under concurrent writers, the prevention gate stack (driven end to end in dry-run mode, so no rule is ever written), `pfctl -s state` and `wg show` parsing, Suricata EVE alerts, and DNS hygiene detections.
+283 xunit tests covering the pure-logic seams the enforcement path depends on: IP normalization (port stripping, zone ids, IPv4-mapped collapse), the non-public/CGNAT range boundaries, atomic writes under concurrent writers, the prevention gate stack (driven end to end in dry-run mode, so no rule is ever written), `pfctl -s state` and `wg show` parsing, the host firewall scan (fixtures are real `pfctl -nvf`, `socketfilterfw` and `lsof` output, so they carry pfctl's own rewrites), Suricata EVE alerts, and DNS hygiene detections.
 
 `TestEnv` points `HOME` at a throwaway directory before anything touches `AppPaths`, and **fails loudly** if the redirect did not take — otherwise a persisting service would write into your real `~/Library/Application Support/NetworkSentinel`.
 
@@ -404,8 +408,8 @@ Self-contained (no system .NET runtime needed):
 `package.sh` produces `dist/networksentinel-<version>-<rid>.tar.gz` plus a ready `dist/Network Sentinel.app` you can drag to Applications. To install from the tarball on a Mac with no .NET:
 
 ```bash
-tar xzf networksentinel-0.7.3-osx-arm64.tar.gz
-cd networksentinel-0.7.3-osx-arm64
+tar xzf networksentinel-0.7.4-osx-arm64.tar.gz
+cd networksentinel-0.7.4-osx-arm64
 sudo ./install.sh                        # /Applications + /usr/local/bin
 ./install.sh --user                      # ~/Applications + ~/.local/bin, no root
 sudo ./install.sh --desktop-shortcut     # also drop a shortcut on the Desktop

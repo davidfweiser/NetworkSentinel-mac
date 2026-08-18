@@ -660,7 +660,8 @@
           <!-- Add/edit form. Inline rather than a modal: the rule lists stay
                visible while a rule is written, which is how you check you are not
                duplicating one. -->
-          <Border Classes="card" Grid.Row="1" Margin="0,0,0,12" IsVisible="{Binding IsRuleEditorOpen}">
+          <Border x:Name="RuleEditorCard" Classes="card" Grid.Row="1" Margin="0,0,0,12"
+                  IsVisible="{Binding IsRuleEditorOpen}">
             <StackPanel Spacing="10">
               <StackPanel>
                 <TextBlock Text="{Binding RuleEditorTitle}" FontWeight="Bold" FontSize="15"/>
@@ -818,11 +819,20 @@
                 <DataGrid ItemsSource="{Binding ListeningServices}" AutoGenerateColumns="False">
                   <DataGrid.Columns>
                     <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*"/>
-                    <DataGridTextColumn Header="Protocol" Binding="{Binding Protocol}" Width="95"/>
+                    <DataGridTextColumn Header="Protocol" Binding="{Binding Protocol}" Width="105"/>
                     <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="80"/>
                     <DataGridTextColumn Header="Service" Binding="{Binding ServiceName}" Width="150"/>
                     <DataGridTextColumn Header="Bind address" Binding="{Binding Address}" Width="170"/>
                     <DataGridTextColumn Header="Firewall" Binding="{Binding Covered}" Width="120"/>
+                    <DataGridTemplateColumn Header="" Width="130">
+                      <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                          <Button Classes="mini-ghost" Content="New rule"
+                                  Command="{Binding $parent[Window].DataContext.NewRuleForListenerCommand}"
+                                  CommandParameter="{Binding}"/>
+                        </DataTemplate>
+                      </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                   </DataGrid.Columns>
                 </DataGrid>
               </DockPanel>
