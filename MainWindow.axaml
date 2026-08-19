@@ -31,7 +31,11 @@
               <Image Source="/Assets/icon.png" Width="42" Height="42" Stretch="UniformToFill"/>
             </Border>
             <StackPanel Grid.Column="1" VerticalAlignment="Center">
-              <TextBlock Text="Network Sentinel" FontSize="16" FontWeight="Bold"/>
+              <!-- Wraps rather than clipping: the rail is 230px and the mark takes
+                   54 of them, which leaves the title a few pixels short of fitting
+                   on one line — it read as "Network Sentine". -->
+              <TextBlock Text="Network Sentinel" FontSize="16" FontWeight="Bold"
+                         TextWrapping="Wrap"/>
               <TextBlock Text="Port &amp; intrusion watch" Foreground="{DynamicResource TextMutedBrush}" FontSize="11"/>
               <TextBlock Text="{Binding AppVersion}" Foreground="{DynamicResource TextMutedBrush}" FontSize="10" Margin="0,2,0,0" Opacity="0.85"/>
               <TextBlock Text="macOS" Foreground="{DynamicResource AccentCyanBrush}" FontSize="10" Margin="0,2,0,0"/>
@@ -742,13 +746,25 @@
                 <DataGrid ItemsSource="{Binding InboundRules}" SelectedItem="{Binding SelectedInboundRule}"
                           AutoGenerateColumns="False">
                   <DataGrid.Columns>
-                    <DataGridTextColumn Header="Label" Binding="{Binding LabelText}" Width="*"/>
+                    <!-- Label and the address list share the slack: a rule name and an
+                         IPv6 range are both long, and fixing either at 190px cut them in
+                         half. The wide class gives those cells the ellipsis-and-tooltip
+                         treatment, so a value too wide for its column is still readable. -->
+                    <DataGridTextColumn Header="Label" Binding="{Binding LabelText}" Width="*" MinWidth="220"
+                                        CellStyleClasses="wide"/>
                     <DataGridTextColumn Header="Action" Binding="{Binding ActionText}" Width="95"/>
                     <DataGridTextColumn Header="Protocol" Binding="{Binding ProtocolText}" Width="105"/>
                     <DataGridTextColumn Header="Port range" Binding="{Binding PortRangeText}" Width="125"/>
-                    <DataGridTextColumn Header="Sources" Binding="{Binding AddressListText}" Width="190"/>
-                    <DataGridTextColumn Header="Created by" Binding="{Binding OriginText}" Width="150"/>
-                    <DataGridTemplateColumn Header="" Width="150">
+                    <DataGridTextColumn Header="Sources" Binding="{Binding AddressListText}" Width="*" MinWidth="200"
+                                        CellStyleClasses="wide"/>
+                    <DataGridTextColumn Header="Created by" Binding="{Binding OriginText}" Width="150"
+                                        CellStyleClasses="wide"/>
+                    <!-- Auto, not a pinned width: Edit and Delete are shown together here
+                         (unlike the Block/Unblock pairs elsewhere, which swap), and the two
+                         buttons plus their 4px gap do not fit the 150px this column was
+                         pinned at — Delete lost its rounded edge. Sizing to the content
+                         cannot drift out again when a label or a button style changes. -->
+                    <DataGridTemplateColumn Header="" Width="Auto" MinWidth="164">
                       <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
                           <StackPanel Orientation="Horizontal" Spacing="4">
@@ -781,13 +797,25 @@
                 <DataGrid ItemsSource="{Binding OutboundRules}" SelectedItem="{Binding SelectedOutboundRule}"
                           AutoGenerateColumns="False">
                   <DataGrid.Columns>
-                    <DataGridTextColumn Header="Label" Binding="{Binding LabelText}" Width="*"/>
+                    <!-- Label and the address list share the slack: a rule name and an
+                         IPv6 range are both long, and fixing either at 190px cut them in
+                         half. The wide class gives those cells the ellipsis-and-tooltip
+                         treatment, so a value too wide for its column is still readable. -->
+                    <DataGridTextColumn Header="Label" Binding="{Binding LabelText}" Width="*" MinWidth="220"
+                                        CellStyleClasses="wide"/>
                     <DataGridTextColumn Header="Action" Binding="{Binding ActionText}" Width="95"/>
                     <DataGridTextColumn Header="Protocol" Binding="{Binding ProtocolText}" Width="105"/>
                     <DataGridTextColumn Header="Port range" Binding="{Binding PortRangeText}" Width="125"/>
-                    <DataGridTextColumn Header="Destinations" Binding="{Binding AddressListText}" Width="190"/>
-                    <DataGridTextColumn Header="Created by" Binding="{Binding OriginText}" Width="150"/>
-                    <DataGridTemplateColumn Header="" Width="150">
+                    <DataGridTextColumn Header="Destinations" Binding="{Binding AddressListText}" Width="*" MinWidth="200"
+                                        CellStyleClasses="wide"/>
+                    <DataGridTextColumn Header="Created by" Binding="{Binding OriginText}" Width="150"
+                                        CellStyleClasses="wide"/>
+                    <!-- Auto, not a pinned width: Edit and Delete are shown together here
+                         (unlike the Block/Unblock pairs elsewhere, which swap), and the two
+                         buttons plus their 4px gap do not fit the 150px this column was
+                         pinned at — Delete lost its rounded edge. Sizing to the content
+                         cannot drift out again when a label or a button style changes. -->
+                    <DataGridTemplateColumn Header="" Width="Auto" MinWidth="164">
                       <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
                           <StackPanel Orientation="Horizontal" Spacing="4">
@@ -815,14 +843,19 @@
                   <TextBlock Text="Listening services" FontWeight="Bold" FontSize="15"/>
                   <TextBlock Text="{Binding FirewallConfigListenerText}" FontSize="11.5" Margin="0,2,0,0"
                              Foreground="{DynamicResource TextSecondaryBrush}"/>
+                  <TextBlock Text="{Binding FirewallConfigListenerHint}" FontSize="11.5" Margin="0,2,0,0"
+                             Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap"/>
                 </StackPanel>
                 <DataGrid ItemsSource="{Binding ListeningServices}" AutoGenerateColumns="False">
                   <DataGrid.Columns>
-                    <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*"/>
+                    <DataGridTextColumn Header="Process" Binding="{Binding Process}" Width="*" MinWidth="160"
+                                        CellStyleClasses="wide"/>
                     <DataGridTextColumn Header="Protocol" Binding="{Binding Protocol}" Width="105"/>
                     <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="80"/>
-                    <DataGridTextColumn Header="Service" Binding="{Binding ServiceName}" Width="150"/>
-                    <DataGridTextColumn Header="Bind address" Binding="{Binding Address}" Width="170"/>
+                    <DataGridTextColumn Header="Service" Binding="{Binding ServiceName}" Width="150"
+                                        CellStyleClasses="wide"/>
+                    <DataGridTextColumn Header="Bind address" Binding="{Binding Address}" Width="*" MinWidth="170"
+                                        CellStyleClasses="wide"/>
                     <DataGridTextColumn Header="Firewall" Binding="{Binding Covered}" Width="120"/>
                     <DataGridTemplateColumn Header="" Width="130">
                       <DataGridTemplateColumn.CellTemplate>

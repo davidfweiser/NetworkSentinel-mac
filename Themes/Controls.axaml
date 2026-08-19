@@ -116,6 +116,20 @@
     <Setter Property="FontSize" Value="12.5"/>
   </Style>
 
+  <!-- Values in these grids are routinely wider than any sensible column: a rule
+       label, an address list, an IPv6 range. Trimming says something was cut; it does
+       not say what, so a cell marked wide carries its own full text as a tooltip.
+       Only the wide columns get one — a tooltip repeating "Block" on every short cell
+       is noise, and there is no "is this text actually trimmed" selector to decide it
+       per cell. -->
+  <Style Selector="DataGridCell TextBlock">
+    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+  </Style>
+
+  <Style Selector="DataGridCell.wide TextBlock">
+    <Setter Property="ToolTip.Tip" Value="{Binding $self.Text}"/>
+  </Style>
+
   <Style Selector="DataGridColumnHeader">
     <Setter Property="Background" Value="#0DFFFFFF"/>
     <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>

@@ -2712,8 +2712,11 @@ public sealed class WebApp : IDisposable
       <button id="btnAddOutbound">Add an Outbound Rule</button>
       <button id="btnRefreshFwCfg">Rescan the host firewall</button>
     </div>
+    <!-- Summary, then listeners, then policy — the same three lines in the same
+         order as the desktop page's header card. -->
+    <p class="muted" id="fwCfgSummary" style="margin:0 0 6px;font-size:.85rem"></p>
+    <p class="muted" id="fwCfgListeners" style="margin:0 0 6px;font-size:.85rem"></p>
     <p class="muted" id="fwCfgPolicy" style="margin:0 0 10px;font-size:.85rem"></p>
-    <p class="muted" id="fwCfgSummary" style="margin:0 0 10px;font-size:.85rem"></p>
 
     <div id="ruleEditor" class="settings-group hidden" style="margin-bottom:14px">
       <h3 id="ruleEditorTitle" style="margin:0 0 4px;font-size:.95rem">Add an Inbound Rule</h3>
@@ -3255,6 +3258,9 @@ public sealed class WebApp : IDisposable
     const mine = rules.filter(r => !r.isForeign).length;
     const listeners = state.listeners || [];
 
+    // Every sentence here is built the same way in the GUI's ApplyHostScan, from the
+    // same fields, so an operator moving between the two front-ends reads the same
+    // page about the same firewall.
     const dropsByDefault = (fw.defaultInbound || '').toLowerCase() !== 'accept';
     $('fwCfgPolicy').textContent =
       `Default policy: ${fw.defaultInbound || '?'} inbound, ${fw.defaultOutbound || '?'} outbound. ` +
@@ -3265,9 +3271,14 @@ public sealed class WebApp : IDisposable
       'Rules match in order, first match wins. ' + (fw.privilegeNote || '');
     $('fwCfgSummary').textContent =
       `${fw.host || ''} · ${fw.backend || '?'} · ${fw.status || '?'} · ${fw.rulesSummary || 'No rules'} ` +
-      `(${mine} from Network Sentinel, ${rules.length - mine} from the rest of the host). ` +
-      `Scanned ${fw.scannedAt || '—'}. Live refresh is off on this tab; click Rescan to re-read the kernel.` +
+      `(${mine} from Network Sentinel, ${rules.length - mine} from the rest of the host)` +
+      ` · Scanned ${fw.scannedAt || '—'}, not live — Rescan to re-read the kernel.` +
       ((fw.errors && fw.errors.length) ? '  ' + fw.errors.join('  ') : '');
+    const openCount = listeners.filter(l => l.covered === 'Open').length;
+    $('fwCfgListeners').textContent = listeners.length === 0
+      ? 'No listening sockets were readable.'
+      : `${listeners.length} listening socket${listeners.length === 1 ? '' : 's'} · ` +
+        `${openCount} reachable from anywhere`;
     $('inboundCount').textContent = `(${inbound.length})`;
     $('outboundCount').textContent = `(${outbound.length})`;
     $('listenerCount').textContent = `(${listeners.length})`;
@@ -3295,10 +3306,12 @@ public sealed class WebApp : IDisposable
     // them. Without this you read `lsof -nP -iTCP -sTCP:LISTEN` in a terminal and
     // retype the port, which is how ports and bind addresses go missing from the
     // rule set.
+    // Same two lines the GUI's Listening services card carries, in the same order:
+    // the count and reachability, then what the table is.
     $('listenHint').textContent =
-      `${listeners.length} listening socket${listeners.length === 1 ? '' : 's'} — the same set ` +
-      '"lsof -nP -iTCP -sTCP:LISTEN" prints, with what the inbound rules above do to each one. ' +
-      '"New rule" fills the form above in with that socket’s protocol and port.';
+      ($('fwCfgListeners').textContent ? $('fwCfgListeners').textContent + ' — ' : '') +
+      'The same set “lsof -nP -iTCP -sTCP:LISTEN” prints, with what the inbound rules above ' +
+      'do to each one. “New rule” fills the form above in with that socket’s protocol and port.';
     $('tbl-fwconfig-listeners').innerHTML = table(
       ['Process', 'Protocol', 'Port', 'Service', 'Bind address', 'Firewall', ''],
       listeners.map(l => `<tr>
