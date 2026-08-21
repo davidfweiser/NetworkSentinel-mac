@@ -269,8 +269,11 @@ public sealed class FirewallService
                        "dialog cannot be shown in a browser. " + HeadlessElevationHelp(asBlock: false);
             if (Surface == FirewallUiSurface.Desktop && CommandExists("osascript"))
                 return "Applying asks for your Mac password (admin dialog).";
+            // The terminal path tries the admin dialog first and falls back to sudo on
+            // this TTY, so over SSH — where there is no session to draw a dialog on —
+            // the second half is what actually happens.
             if (HasTerminal())
-                return "Applying asks for your Mac password on this terminal (sudo).";
+                return "Applying asks for your Mac password (admin dialog, or sudo on this terminal).";
             return "Applying will fail: this session has no way to show a password prompt.";
         }
     }
@@ -736,9 +739,19 @@ public sealed class FirewallService
         // re-checking is the only way to answer it without waiting out the probe cache.
         InvalidateElevationProbe();
         if (CanElevateSilently())
-            return FirewallOperationResult.Ok(
-                "Nothing to authorize — this user already has passwordless sudo, so rules apply " +
-                "without a prompt.");
+        {
+            // Nothing to authorize, but the anchor hook still has to be there or the
+            // first rule loads into a ruleset /etc/pf.conf never reads. Hooking it
+            // costs no dialog on this path, so the button does the whole job rather
+            // than reporting success and leaving the one side effect undone.
+            var silentHook = EnsureAnchorHooked();
+            return silentHook.Success
+                ? FirewallOperationResult.Ok(
+                    "Nothing to authorize — this user already has passwordless sudo, so rules apply " +
+                    "without a prompt.")
+                : FirewallOperationResult.Fail(
+                    "Passwordless sudo works, but could not install the PF anchor hook: " + silentHook.Message);
+        }
 
         if (!CanApplyRules)
             return NoElevation("apply firewall rules");
