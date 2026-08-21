@@ -247,6 +247,8 @@ public sealed class HostFirewallScanner
 
     private string PrivilegeNote()
     {
+        if (!FirewallService.PlatformSupported)
+            return FirewallService.UnsupportedPlatformText;
         if (_firewall.IsRoot)
             return "Running as root — the live PF ruleset and every process name are visible.";
         return "Running unprivileged: pfctl needs root to open /dev/pf, so the ruleset is read through " +

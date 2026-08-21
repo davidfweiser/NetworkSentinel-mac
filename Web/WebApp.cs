@@ -88,14 +88,27 @@ public sealed class WebApp : IDisposable
     }
 
     /// <summary>
-    /// Stable identity for a scanned rule, so a Delete pressed in the browser acts
-    /// on the row that was displayed. Rule names are not unique across the host —
-    /// two pf anchors can both hold an allow-inbound-ssh — so the key is the rule's
-    /// whole shape, and an ambiguous match is refused rather than guessed at.
+    /// The identity the browser hands back when a row's Edit or Delete is clicked.
+    ///
+    /// Shape is not an identity. Two rules can share action, protocol, port range,
+    /// sources and label and still be two separate rules in the ruleset — adding the
+    /// same rule twice is all it takes, which is what an operator does after a delete
+    /// appears to fail, and the page lists both. On a shape-only key both rows then
+    /// matched either row's key, the lookup found two and refused with "Several rules
+    /// on this host have exactly that shape", and from that point neither row could be
+    /// deleted or edited again. The one remedy it offered — give them distinct labels
+    /// — is done by editing them, through this same lookup.
+    ///
+    /// Name, anchor and interface are what tell those rows apart here: SaveCustomRule
+    /// mints "…-2" for a repeated label, and PF, which has no rule handles, is at least
+    /// specific about which anchor holds what. The shape stays in the key as well, so a
+    /// key can still only ever match a rule that looks the way it did when the page was
+    /// rendered.
     /// </summary>
-    private static string ScannedRuleKey(FirewallRuleInfo r) => string.Join("|",
+    internal static string ScannedRuleKey(FirewallRuleInfo r) => string.Join("|",
         r.IsInbound ? "in" : "out", r.ActionText, r.ProtocolText,
-        r.PortRangeText, r.AddressListText, r.LabelText, r.Origin);
+        r.PortRangeText, r.AddressListText, r.LabelText, r.Origin,
+        r.Name, r.Handle, r.Table, r.Chain, r.Family);
 
     private FirewallRuleInfo? FindScannedRule(string key, out string problem)
     {
@@ -105,12 +118,18 @@ public sealed class WebApp : IDisposable
             .Where(r => string.Equals(ScannedRuleKey(r), key, StringComparison.Ordinal))
             .ToList();
 
-        if (matches.Count == 1) return matches[0];
-        problem = matches.Count == 0
-            ? "That rule is no longer in the host firewall — the list has moved on. Refresh and try again."
-            : "Several rules on this host have exactly that shape, so it is not clear which one to remove. " +
-              "Give them distinct labels, or remove it where it was created.";
-        return null;
+        if (matches.Count == 0)
+        {
+            problem = "That rule is no longer in the host firewall — the list has moved on. Refresh and try again.";
+            return null;
+        }
+
+        // Rows that agree on shape *and* on name, anchor, interface and family are the
+        // same rule as far as anything here can see — PF holds no handles, so two
+        // identical rules in one anchor carry nothing to tell them apart. Removing
+        // either is what was asked for, so take the first rather than refuse a delete
+        // that could never be made unambiguous.
+        return matches[0];
     }
     private readonly WebAuthStore _auth = new();
     private readonly AppSettings _settings;
@@ -1361,8 +1380,8 @@ public sealed class WebApp : IDisposable
 
                 case "remove_all_rules":
                 {
-                    if (!_firewall.IsAdministrator)
-                        return ActionResultDto.Fail("Cannot remove rules — run the web service as root, or allow the Mac password prompt.");
+                    if (!_firewall.CanApplyRules)
+                        return ActionResultDto.Fail(CannotWriteText("remove rules"));
 
                     // Suppress auto-block for every removed IP so nothing "comes back".
                     var blockedBefore = _firewall.GetBlockedIps();
@@ -1513,8 +1532,8 @@ public sealed class WebApp : IDisposable
                     if (guard != null)
                         return ActionResultDto.Fail(guard);
 
-                    if (!_firewall.IsAdministrator)
-                        return ActionResultDto.Fail("Cannot write rules — run the web service as root, or where sudo works without a password.");
+                    if (!_firewall.CanApplyRules)
+                        return ActionResultDto.Fail(CannotWriteText("write rules"));
 
                     var replace = string.IsNullOrWhiteSpace(req.Replace)
                         ? null
@@ -1549,6 +1568,9 @@ public sealed class WebApp : IDisposable
 
                 case "rescan_firewall":
                 {
+                    // The operator's reason for rescanning is often that they have just
+                    // changed something on the host — the sudoers file included.
+                    FirewallService.InvalidateElevationProbe();
                     var scan = HostScan(force: true);
                     _statusMessage = $"{scan.HostLabel}: {scan.Backend} · {scan.Status} · {scan.RulesSummary}.";
                     return ActionResultDto.Success(_statusMessage);
@@ -1558,8 +1580,8 @@ public sealed class WebApp : IDisposable
                 {
                     var key = (req.Key ?? "").Trim();
                     if (key.Length == 0) return ActionResultDto.Fail("Rule identity required.");
-                    if (!_firewall.IsAdministrator)
-                        return ActionResultDto.Fail("Cannot remove rules — run the web service as root, or where sudo works without a password.");
+                    if (!_firewall.CanApplyRules)
+                        return ActionResultDto.Fail(CannotWriteText("remove rules"));
 
                     var target = FindScannedRule(key, out var problem);
                     if (target == null) return ActionResultDto.Fail(problem);
@@ -1595,8 +1617,8 @@ public sealed class WebApp : IDisposable
                         return ActionResultDto.Fail("Rule name required.");
                     if (IsOwnWebRule(name))
                         return ActionResultDto.Fail(SelfRuleRefusal(name));
-                    if (!_firewall.IsAdministrator)
-                        return ActionResultDto.Fail("Cannot remove rules — run the web service as root, or allow the Mac password prompt.");
+                    if (!_firewall.CanApplyRules)
+                        return ActionResultDto.Fail(CannotWriteText("remove rules"));
 
                     FirewallOperationResult r;
                     try
@@ -1844,6 +1866,14 @@ public sealed class WebApp : IDisposable
                 defaultOutbound = hostScan.DefaultOutbound,
                 description = hostScan.Description,
                 privilegeNote = hostScan.PrivilegeNote,
+                // Whether Save and Delete can land at all, decided here rather than
+                // discovered at the write: on this surface nothing can prompt, so a Mac
+                // with no passwordless sudo can never apply a rule and the page has no
+                // business offering an editor that will always fail.
+                canWriteRules = _firewall.CanApplyRules,
+                elevationLead = _firewall.CanApplyRules ? "" : FirewallService.HeadlessElevationLead,
+                elevationCommands = _firewall.CanApplyRules ? "" : FirewallService.SudoersInstallCommands(),
+                elevationTail = _firewall.CanApplyRules ? "" : FirewallService.HeadlessElevationTail,
                 rulesSummary = hostScan.RulesSummary,
                 backendsSeen = hostScan.BackendsSeen,
                 errors = hostScan.Errors,
@@ -1931,6 +1961,17 @@ public sealed class WebApp : IDisposable
         => $"\"{name}\" is the allow rule that lets your browser reach this console — " +
            "removing it from here would instantly cut off this page (it looks like a crash). " +
            "To remove web access, stop or uninstall the web service on the server.";
+
+    /// <summary>
+    /// Why a write cannot be attempted from here, with the fix already written out for
+    /// this host. The old wording — "run the web service as root, or allow the Mac
+    /// password prompt" — offered a prompt that cannot appear anywhere the operator can
+    /// see it. What is missing is either root or the grant, so that is what this names.
+    /// </summary>
+    private static string CannotWriteText(string action)
+        => $"Cannot {action}: this console has no way to run a privileged command. " +
+           "sudo wants a password, and the macOS admin dialog would open on the Mac running the " +
+           $"console rather than in your browser.\n\n{FirewallService.HeadlessElevationHelp()}";
 
     /// <summary>
     /// Why a Firewall Config rule cannot be written from this console, or null when
@@ -2334,6 +2375,25 @@ public sealed class WebApp : IDisposable
   }
   .status.err { border-color: rgba(255,93,120,.45); color: #ffa8b6; }
   .status.good { border-color: rgba(77,209,140,.4); color: #a6e6c4; }
+  /* Firewall Config's read-only notice. Amber, not red: the page is working, it
+     just cannot write, and the commands that fix it are right there. */
+  .elev-banner {
+    margin: 0 0 14px; padding: 12px 16px; border-radius: 10px;
+    background: rgba(245,185,59,.08); border: 1px solid rgba(245,185,59,.45);
+    color: #f6d089; font-size: .85rem;
+  }
+  .elev-banner strong {
+    display: block; color: var(--amber); letter-spacing: .04em;
+    text-transform: uppercase; font-size: .74rem; margin-bottom: 6px;
+  }
+  .elev-banner p { margin: 0 0 8px; }
+  .elev-banner pre {
+    margin: 0 0 8px; padding: 10px 12px; border-radius: 8px; overflow-x: auto;
+    background: rgba(0,0,0,.28); color: var(--text2);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem;
+    white-space: pre; user-select: all;
+  }
+  .elev-banner .tail { margin: 0; opacity: .85; }
   .cards {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 10px; margin-bottom: 16px;
@@ -2816,6 +2876,15 @@ public sealed class WebApp : IDisposable
       <button id="btnAddInbound">Add an Inbound Rule</button>
       <button id="btnAddOutbound">Add an Outbound Rule</button>
       <button id="btnRefreshFwCfg">Rescan the host firewall</button>
+    </div>
+    <!-- Shown only when a write cannot land. The console reads the whole ruleset
+         through `sudo -n` and can still have no way to change any of it, and until
+         now nothing said so until Save had already failed. -->
+    <div id="fwCfgElevation" class="elev-banner hidden">
+      <strong>Read-only — rules cannot be changed from here</strong>
+      <p id="fwCfgElevationLead"></p>
+      <pre id="fwCfgElevationCmds"></pre>
+      <p class="tail" id="fwCfgElevationTail"></p>
     </div>
     <!-- Summary, then listeners, then policy — the same three lines in the same
          order as the desktop page's header card. -->
@@ -3399,6 +3468,23 @@ public sealed class WebApp : IDisposable
     $('outboundCount').textContent = `(${outbound.length})`;
     $('listenerCount').textContent = `(${listeners.length})`;
 
+    // A host this console can read but not write. Say so once at the top, and stop
+    // offering buttons whose only outcome is the same failure — an editor that
+    // accepts a rule and then refuses to save it reads as the console being broken.
+    const readOnly = fw.canWriteRules === false;
+    $('fwCfgElevation').classList.toggle('hidden', !readOnly);
+    if (readOnly) {
+      $('fwCfgElevationLead').textContent = fw.elevationLead || '';
+      $('fwCfgElevationCmds').textContent = fw.elevationCommands || '';
+      $('fwCfgElevationTail').textContent = fw.elevationTail || '';
+      if (!$('ruleEditor').classList.contains('hidden')) closeRuleEditor();
+    }
+    const noWriteTitle = 'This console cannot change firewall rules — see the notice above the table.';
+    for (const id of ['btnAddInbound', 'btnAddOutbound']) {
+      $(id).disabled = readOnly;
+      $(id).title = readOnly ? noWriteTitle : '';
+    }
+
     const rows = (list, addrHeader) => table(
       ['Label', 'Action', 'Protocol', 'Port range', addrHeader, 'Created by', ''],
       list.map(r => `<tr>
@@ -3410,8 +3496,11 @@ public sealed class WebApp : IDisposable
         <td class="muted">${esc(r.origin)}</td>
         <td class="row-actions">${r.isProtected
           ? '<span class="muted" title="The allow rule that lets your browser reach this console">console</span>'
-          : `<button data-editrule="${esc(r.key)}">Edit</button> ` +
-            `<button data-delrule="${esc(r.key)}">Delete</button>`}</td>
+          : readOnly
+            ? `<button disabled title="${esc(noWriteTitle)}">Edit</button> ` +
+              `<button class="rm" disabled title="${esc(noWriteTitle)}">Delete</button>`
+            : `<button data-editrule="${esc(r.key)}">Edit</button> ` +
+              `<button class="rm" data-delrule="${esc(r.key)}">Delete</button>`}</td>
       </tr>`).join('')
     );
 
@@ -3437,9 +3526,11 @@ public sealed class WebApp : IDisposable
         <td class="muted">${esc(l.service)}</td>
         <td class="mono">${esc(l.address)}</td>
         <td class="${COVERED_CLASS[l.covered] || ''}">${esc(l.covered)}</td>
-        <td class="row-actions"><button data-portrule="${esc(l.port)}" data-proto="${esc(l.protocol)}"
+        <td class="row-actions">${readOnly
+          ? `<button disabled title="${esc(noWriteTitle)}">New rule</button>`
+          : `<button data-portrule="${esc(l.port)}" data-proto="${esc(l.protocol)}"
             data-endpoint="${esc(l.address ? l.address + ':' + l.port : 'port ' + l.port)}"
-            data-process="${esc(l.process)}">New rule</button></td>
+            data-process="${esc(l.process)}">New rule</button>`}</td>
       </tr>`).join('') || '<tr><td colspan="7" class="muted">No listening sockets reported.</td></tr>'
     );
   }

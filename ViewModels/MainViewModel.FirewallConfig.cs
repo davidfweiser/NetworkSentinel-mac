@@ -222,7 +222,7 @@ public partial class MainViewModel
         RuleEditorNote =
             $"Writes a rule for {RuleProtocol} port {port}, which {DescribeListener(listener)} is listening on. " +
             "Sources is left empty (every address) — it matches the remote end, not the address the " +
-            "service is bound to. Applying asks for your Mac password.";
+            "service is bound to. " + _firewall.ElevationNote;
     }
 
     private static string DescribeListener(HostListener listener)
@@ -299,7 +299,7 @@ public partial class MainViewModel
                   "Saving removes it there and writes these values as a new rule — " +
                   "PF has no in-place edit, so this is what editing one means."
                 : "Replaces the loaded PF rule with these values.")
-            : "Writes a PF rule into this Mac's Network Sentinel anchor. Applying asks for your Mac password.";
+            : "Writes a PF rule into this Mac's Network Sentinel anchor. " + _firewall.ElevationNote;
         RuleEditorError = "";
         IsRuleEditorOpen = true;
     }

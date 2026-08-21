@@ -11,6 +11,25 @@ using NetworkSentinel.Models;
 namespace NetworkSentinel.Services;
 
 /// <summary>
+/// Which front-end is driving <see cref="FirewallService"/>. The only thing it
+/// decides is where a password could be typed: a desktop session can raise the
+/// macOS admin dialog, a terminal can prompt on its own TTY, and the web console
+/// can do neither — the operator is in a browser, and any dialog would have to
+/// appear on the Mac they are not sitting at.
+/// </summary>
+public enum FirewallUiSurface
+{
+    /// <summary>The Avalonia GUI — osascript can raise the admin dialog.</summary>
+    Desktop,
+
+    /// <summary>The TUI over SSH or a console — sudo can prompt on the TTY.</summary>
+    Terminal,
+
+    /// <summary>The headless web console — nothing can prompt.</summary>
+    Web
+}
+
+/// <summary>
 /// Manages host firewall rules owned by Network Sentinel on macOS via PF
 /// (<c>pfctl</c>) anchors. The GUI always runs as the normal user; privileged
 /// commands are elevated per-call with <c>osascript</c> (admin password dialog)
@@ -54,28 +73,205 @@ public sealed class FirewallService
 
     public AllowlistService? Allowlist { get; set; }
 
+    /// <summary>
+    /// True on the one platform whose firewall this service can drive. Everything
+    /// below — PF, <c>pfctl</c>, the anchor hook in /etc/pf.conf, <c>geteuid</c>,
+    /// the osascript admin dialog — is macOS, and the read path is <c>lsof</c> and
+    /// <c>pfctl</c>, so there is no privilege level on another OS that would let a
+    /// rule be written. Checked before the elevation probes so a Linux or Windows
+    /// run is told what is actually wrong instead of being sent to find a password
+    /// that would not help if it were typed.
+    /// </summary>
+    public static bool PlatformSupported => OperatingSystem.IsMacOS();
+
+    /// <summary>What to say instead of asking for a password the OS has no use for.</summary>
+    public const string UnsupportedPlatformText =
+        "Network Sentinel drives the macOS host firewall (PF, through pfctl and the com.networksentinel " +
+        "anchor) and has no backend for this operating system, so no privilege level here can apply a " +
+        "rule — running it as root or Administrator would not change that. Run it on a Mac; the Linux " +
+        "and Windows firewalls are driven by the separate ports of this app.";
+
     /// <summary>True when euid is root (GUI should normally not run as root).</summary>
     public bool IsRoot => IsRootProcess();
 
     /// <summary>Static form, for the read path which has no instance to hand.</summary>
     internal static bool IsRootProcess()
     {
+        // The P/Invoke below binds to libc; calling it off a Unix host throws every time.
+        if (!PlatformSupported) return false;
         try { return geteuid() == 0; }
         catch { return false; }
     }
 
     /// <summary>True when firewall changes can be attempted (root or elevatable).</summary>
-    public bool IsAdministrator => IsRoot || CanElevate;
+    public bool IsAdministrator => PlatformSupported && (IsRoot || CanElevate);
 
-    public bool CanElevate => true; // osascript admin dialog is always available on macOS GUI; sudo may work in TUI
+    /// <summary>
+    /// Whether an elevation helper exists at all. This used to be a bare <c>true</c>,
+    /// on the grounds that a Mac always has the osascript admin dialog — which is
+    /// right about the binary and wrong about the operator, because the dialog opens
+    /// on the Mac's own screen. See <see cref="CanApplyRules"/> for the question the
+    /// callers were actually asking.
+    /// </summary>
+    public bool CanElevate =>
+        PlatformSupported && (IsRoot || CommandExists("osascript") || CommandExists("sudo"));
+
+    /// <summary>
+    /// Which front-end is running. Set once at startup by <c>Program</c>; the default
+    /// suits the GUI, which is the one process that does not set it.
+    /// </summary>
+    public static FirewallUiSurface Surface { get; set; } = FirewallUiSurface.Desktop;
+
+    /// <summary>
+    /// Whether a password prompt could actually reach the operator who is asking.
+    /// The admin dialog osascript raises is drawn by the window server on the Mac
+    /// running this process: fine for the desktop app, useless for a browser
+    /// somewhere else, and there is no session to draw on under launchd at all.
+    /// </summary>
+    private static bool CanPromptOnThisSurface()
+    {
+        if (!PlatformSupported) return false;
+        if (Surface == FirewallUiSurface.Web) return false;
+        if (Surface == FirewallUiSurface.Desktop && CommandExists("osascript")) return true;
+        return CommandExists("sudo") && HasTerminal();
+    }
+
+    /// <summary>Whether sudo could prompt on a terminal — false for a GUI started from Finder.</summary>
+    private static bool HasTerminal()
+    {
+        try { return !Console.IsInputRedirected; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// True when a rule written now would actually reach the kernel: this process is
+    /// root, or sudo runs the rule script without asking, or there is somewhere on
+    /// this surface to type a password.
+    ///
+    /// <see cref="IsAdministrator"/> only reports that some elevation helper exists,
+    /// which on macOS is always — so on a headless web console it was true on a Mac
+    /// where every single write fails. That is how an operator came to open the rule
+    /// editor, fill it in, and learn only at Save that the console had never been
+    /// able to write anything.
+    /// </summary>
+    public bool CanApplyRules
+        => PlatformSupported && (IsRoot || CanElevateSilently() || CanPromptOnThisSurface());
+
+    /// <summary>
+    /// What to do about a Mac that cannot show the operator a prompt, as commands to
+    /// run rather than a section to go and find. <paramref name="asBlock"/> keeps the
+    /// newlines for a console or a preformatted block; the flowed form is for a
+    /// one-line status.
+    /// </summary>
+    public static string HeadlessElevationHelp(bool asBlock = true)
+    {
+        var steps = SudoersInstallCommands();
+        return asBlock
+            ? $"{HeadlessElevationLead}\n\n{steps}\n\n{HeadlessElevationTail}"
+            : $"{HeadlessElevationLead} {steps.Replace("\n", "  ")} {HeadlessElevationTail}";
+    }
+
+    /// <summary>
+    /// The commands on their own, so a front-end that can lay out a code block does
+    /// not have to pick them back out of the prose. PF rules are applied by running a
+    /// generated script, so the grant has to name the shell — which is why running the
+    /// console as root is offered first rather than as a fallback.
+    /// </summary>
+    public static string SudoersInstallCommands()
+        => "sudo NetworkSentinel --web        # run the console itself as root\n" +
+           "\n" +
+           "# or, to keep it running as this user:\n" +
+           $"echo '{SudoersGrantText()}' | sudo tee /etc/sudoers.d/networksentinel\n" +
+           "sudo chmod 0440 /etc/sudoers.d/networksentinel\n" +
+           "sudo visudo -c";
+
+    /// <summary>
+    /// The sudoers grant that makes writes work where nothing can prompt, with this
+    /// host's own user name filled in. It names <c>/bin/bash</c> because that is what
+    /// a PF rule write actually runs — the ruleset is generated and applied as a
+    /// script — and callers say plainly that this is a root shell in all but name.
+    /// </summary>
+    public static string SudoersGrantText()
+        => $"{Environment.UserName} ALL=(root) NOPASSWD: /bin/bash";
+
+    public const string HeadlessElevationLead =
+        "The macOS admin dialog opens on the Mac running this console, not in your browser, so a write " +
+        "has to be able to proceed without one. From a Terminal on that Mac:";
+
+    public const string HeadlessElevationTail =
+        "The sudoers line is a root shell in all but name, because PF rules are applied by running a " +
+        "generated script — on a shared Mac, run the console as root instead. Then use Rescan to " +
+        "re-check.";
+
+    /// <summary>
+    /// Why a write cannot even be attempted, naming the gap that is actually there:
+    /// an OS with no backend, no helper at all, or a helper with no way to ask for a
+    /// password on this surface.
+    /// </summary>
+    private FirewallOperationResult NoElevation(string action)
+    {
+        if (!PlatformSupported)
+            return FirewallOperationResult.Fail(UnsupportedPlatformText);
+
+        if (Surface == FirewallUiSurface.Web)
+            return FirewallOperationResult.Fail(
+                $"This user has no passwordless sudo, so the web console cannot {action}: the admin " +
+                $"dialog would have to appear on the Mac running the console, not in your browser.\n\n" +
+                HeadlessElevationHelp());
+
+        if (!CanElevate)
+            return FirewallOperationResult.Fail(
+                $"No elevation helper is installed, so Network Sentinel cannot {action}.");
+
+        return FirewallOperationResult.Fail(
+            $"Elevation is available but has no way to ask for a password, so Network Sentinel cannot {action}. " +
+            "Run it from a Terminal, or grant this user passwordless sudo (see “Firewall elevation on a " +
+            "headless Mac” in the README).");
+    }
 
     public string PrivilegeText
     {
         get
         {
+            if (!PlatformSupported)
+                return UnsupportedPlatformText;
             if (IsRoot)
                 return "Running as root — PF rules can be applied directly.";
+            if (CanElevateSilently())
+                return "Running as your user with passwordless sudo — rules apply without a prompt.";
+            if (Surface == FirewallUiSurface.Web)
+                return "Running as your user with no passwordless sudo, so the console cannot write rules: " +
+                       "the admin dialog would appear on the Mac running it, not in this browser. " +
+                       HeadlessElevationHelp(asBlock: false);
             return "Running as your user. Firewall changes will ask for your Mac password (osascript admin dialog or sudo).";
+        }
+    }
+
+    /// <summary>
+    /// One sentence for a form that is about to write a rule: what applying will
+    /// actually ask for on this host. The editor used to state "asks for your Mac
+    /// password" unconditionally, which reads as a demand on the two hosts where
+    /// nothing is asked at all — already root, and passwordless sudo — and promises a
+    /// dialog on the one surface that cannot show one.
+    /// </summary>
+    public string ElevationNote
+    {
+        get
+        {
+            if (!PlatformSupported)
+                return UnsupportedPlatformText;
+            if (IsRoot)
+                return "Applying writes the rule directly — this process is already root.";
+            if (CanElevateSilently())
+                return "Applying writes the rule through passwordless sudo — nothing is asked for.";
+            if (Surface == FirewallUiSurface.Web)
+                return "Applying will fail: this console has no passwordless sudo, and the macOS admin " +
+                       "dialog cannot be shown in a browser. " + HeadlessElevationHelp(asBlock: false);
+            if (Surface == FirewallUiSurface.Desktop && CommandExists("osascript"))
+                return "Applying asks for your Mac password (admin dialog).";
+            if (HasTerminal())
+                return "Applying asks for your Mac password on this terminal (sudo).";
+            return "Applying will fail: this session has no way to show a password prompt.";
         }
     }
 
@@ -99,7 +295,7 @@ public sealed class FirewallService
             return FirewallOperationResult.Fail($"Refusing to block allowlisted address {normalized} ({allowReason}).");
 
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         var results = new List<string>();
         var ok = true;
@@ -129,7 +325,7 @@ public sealed class FirewallService
             return FirewallOperationResult.Fail(error);
 
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         var inName = IpRuleName(normalized, true);
         var outName = IpRuleName(normalized, false);
@@ -152,7 +348,7 @@ public sealed class FirewallService
             return FirewallOperationResult.Fail("Protocol must be TCP or UDP.");
 
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         var results = new List<string>();
         var ok = true;
@@ -180,7 +376,7 @@ public sealed class FirewallService
     {
         protocol = (protocol ?? "TCP").Trim().ToUpperInvariant();
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         var r1 = RemoveRuleByName(PortRuleName(port, protocol, true));
         var r2 = RemoveRuleByName(PortRuleName(port, protocol, false));
@@ -198,7 +394,7 @@ public sealed class FirewallService
                 return FirewallOperationResult.Fail("Only Network Sentinel managed rules can be removed here.");
 
             if (!IsAdministrator)
-                return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+                return NoElevation("modify the host firewall");
 
             var name = ruleName.Trim();
 
@@ -228,7 +424,7 @@ public sealed class FirewallService
                     .ToList();
 
                 if (removed.Count == 0)
-                    return FirewallOperationResult.Fail($"No rule named “{name}”.");
+                    return FirewallOperationResult.Fail(AlreadyGoneText(name));
 
                 ledger.RemoveAll(r => removed.Contains(r.Name, StringComparer.OrdinalIgnoreCase));
                 SaveLedger(ledger);
@@ -253,7 +449,7 @@ public sealed class FirewallService
     public FirewallOperationResult RemoveAllManagedRules(Func<FirewallRuleInfo, bool>? skip = null)
     {
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         int removed;
         int keptCount;
@@ -322,7 +518,7 @@ public sealed class FirewallService
             return FirewallOperationResult.Fail("Allowlist is not available.");
 
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to remove firewall rules.");
+            return NoElevation("remove firewall rules");
 
         var rules = GetManagedRules().Where(r => r.Kind == FirewallRuleKind.IpBlock).ToList();
         int removed = 0;
@@ -381,7 +577,7 @@ public sealed class FirewallService
             return FirewallOperationResult.Fail(error);
 
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         string name;
         lock (LedgerGate)
@@ -437,7 +633,7 @@ public sealed class FirewallService
     public FirewallOperationResult DeleteHostRule(FirewallRuleInfo rule)
     {
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         // One of ours: go through the ledger so its bookkeeping stays truthful.
         if (!rule.IsForeign || rule.Kind != FirewallRuleKind.Other)
@@ -528,8 +724,24 @@ public sealed class FirewallService
     /// </summary>
     public FirewallOperationResult AuthorizeElevation()
     {
+        if (!PlatformSupported)
+            return FirewallOperationResult.Fail(UnsupportedPlatformText);
+
         if (IsRoot)
             return FirewallOperationResult.Ok("Already running as root.");
+
+        // On the web console there is no dialog to raise, so the button does the other
+        // useful thing instead: it re-checks whether sudo will run the rule script now.
+        // That is what an operator who has just written the sudoers file wants, and
+        // re-checking is the only way to answer it without waiting out the probe cache.
+        InvalidateElevationProbe();
+        if (CanElevateSilently())
+            return FirewallOperationResult.Ok(
+                "Nothing to authorize — this user already has passwordless sudo, so rules apply " +
+                "without a prompt.");
+
+        if (!CanApplyRules)
+            return NoElevation("apply firewall rules");
 
         // Touch a harmless privileged read — triggers admin password once.
         var probe = RunPrivilegedShell("/sbin/pfctl -s info >/dev/null 2>&1; /sbin/pfctl -e 2>/dev/null; true");
@@ -545,9 +757,11 @@ public sealed class FirewallService
                 "Authorization OK. Firewall changes can proceed (you may be prompted again after a while).");
         }
 
-        return FirewallOperationResult.Fail(
-            "Elevation failed or was cancelled. " + probe.Message +
-            "\n\nRun the app as your user and allow the Mac admin password dialog when blocking.");
+        var tail = Surface == FirewallUiSurface.Web
+            ? $"\n\n{HeadlessElevationHelp()}"
+            : "\n\nRun the app as your user and allow the Mac admin password dialog when blocking.";
+
+        return FirewallOperationResult.Fail("Elevation failed or was cancelled. " + probe.Message + tail);
     }
 
     [Obsolete("GUI must not restart as root. Use AuthorizeElevation() instead.")]
@@ -607,6 +821,18 @@ public sealed class FirewallService
             : FirewallOperationResult.Fail($"Failed PF apply {name}: {applied.Message}");
     }
 
+    /// <summary>
+    /// Wording for a rule that is not there to remove. One managed rule can hold
+    /// several rows in the host scan — an inbound rule and the outbound sibling
+    /// written with it, or a protocol Any that lists once per family — and removing
+    /// any one row takes them all. So a click on a sibling row from the same listing
+    /// arrives after the rule is already gone. That is the requested end state, not a
+    /// fault, and reporting it as "No rule named …" read as delete being broken.
+    /// </summary>
+    private static string AlreadyGoneText(string name) =>
+        $"“{name}” is no longer in the firewall — it was already removed, most likely " +
+        "together with another row of the same rule.";
+
     private FirewallOperationResult RemoveRuleByName(string name)
     {
         var hadLedger = LoadLedger().Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase));
@@ -614,7 +840,7 @@ public sealed class FirewallService
         var applied = ApplyPfFromLedger();
 
         if (!hadLedger && applied.Success)
-            return FirewallOperationResult.Fail($"No rule named “{name}”.");
+            return FirewallOperationResult.Fail(AlreadyGoneText(name));
 
         return applied.Success
             ? FirewallOperationResult.Ok($"Removed “{name}”.")
@@ -756,7 +982,7 @@ public sealed class FirewallService
     public FirewallOperationResult EnableProbeLogging()
     {
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         UpsertLedger(new FirewallRuleInfo
         {
@@ -792,7 +1018,7 @@ public sealed class FirewallService
     public FirewallOperationResult DisableProbeLogging()
     {
         if (!IsAdministrator)
-            return FirewallOperationResult.Fail("No way to elevate to modify the host firewall.");
+            return NoElevation("modify the host firewall");
 
         RemoveFromLedger(ProbeLogRuleName);
 
@@ -1107,18 +1333,83 @@ public sealed class FirewallService
         }
     }
 
-    private bool CanElevateSilently()
+    /// <summary>
+    /// Whether sudo will apply a rule without asking for anything.
+    ///
+    /// The answer is cached because a refused <c>sudo -n</c> is written to the auth
+    /// log, which this very application watches for break-in attempts; probing on
+    /// every snapshot would have Network Sentinel reporting on itself. Auto-block
+    /// expiry and startup reconciliation both gate on this, so it is asked far more
+    /// often than it can change.
+    /// </summary>
+    internal static bool CanElevateSilently()
     {
-        if (IsRoot) return true;
+        if (!PlatformSupported) return false;
+        if (IsRootProcess()) return true;
+        if (!CommandExists("sudo")) return false;
+
+        var now = Environment.TickCount64;
+        lock (SilentProbeLock)
+        {
+            if (_silentProbeStampMs != 0 &&
+                now - _silentProbeStampMs < (_silentProbeResult ? SilentProbeOkTtlMs : SilentProbeFailTtlMs))
+                return _silentProbeResult;
+        }
+
+        var result = ProbeSilentSudo();
+
+        lock (SilentProbeLock)
+        {
+            _silentProbeResult = result;
+            _silentProbeStampMs = Environment.TickCount64;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Forgets the cached <see cref="CanElevateSilently"/> answer, so an operator who
+    /// has just written the sudoers file sees the change on the next Rescan instead of
+    /// waiting out the cache.
+    /// </summary>
+    public static void InvalidateElevationProbe()
+    {
+        lock (SilentProbeLock)
+            _silentProbeStampMs = 0;
+    }
+
+    private static bool ProbeSilentSudo()
+    {
         try
         {
-            return RunProcess("sudo", "-n", "/usr/bin/true").Success;
+            // A blanket NOPASSWD grant answers here and costs one process.
+            if (RunProcess("sudo", "-n", "/usr/bin/true").Success)
+                return true;
+
+            // A grant scoped to the shell does not, and that is the one a rule write
+            // needs: the PF ruleset is generated and applied as a script, so this asks
+            // for exactly what RunPrivilegedShell will ask for.
+            return RunProcess("sudo", "-n", "/bin/bash", "-c", "exit 0").Success;
         }
         catch
         {
+            // Treated as "cannot elevate silently" — the callers are all best-effort.
             return false;
         }
     }
+
+    private static readonly object SilentProbeLock = new();
+    private static bool _silentProbeResult;
+    private static long _silentProbeStampMs;
+
+    /// <summary>A grant that works is stable; re-checking it often buys nothing.</summary>
+    private const int SilentProbeOkTtlMs = 60_000;
+
+    /// <summary>
+    /// A grant that is missing is the case an operator is actively fixing, but every
+    /// probe leaves a line in the auth log, so it is re-checked less often than it is
+    /// asked about and <see cref="InvalidateElevationProbe"/> covers the impatient.
+    /// </summary>
+    private const int SilentProbeFailTtlMs = 300_000;
 
     private static void PruneExpiredFromLedger()
     {
@@ -1139,16 +1430,28 @@ public sealed class FirewallService
     /// </summary>
     private static FirewallOperationResult RunPrivilegedShell(string shellScript)
     {
-        if (geteuid() == 0)
+        if (!PlatformSupported)
+            return FirewallOperationResult.Fail(UnsupportedPlatformText);
+
+        if (IsRootProcess())
             return RunProcess("/bin/bash", "-c", shellScript);
 
         // 1) sudo -n (cached / passwordless)
+        var cachedMessage = "";
         if (CommandExists("sudo"))
         {
             var cached = RunProcess("sudo", "-n", "/bin/bash", "-c", shellScript);
             if (cached.Success)
                 return cached;
+            cachedMessage = cached.Message;
         }
+
+        // The web console gets no further. osascript would put its admin dialog on the
+        // Mac's own screen, where nobody is sitting, and then hold this request for the
+        // full interactive timeout waiting for an answer that cannot come — so a rule
+        // added from a browser used to hang for five minutes before failing.
+        if (Surface == FirewallUiSurface.Web)
+            return FirewallOperationResult.Fail(NoPasswordPromptText(cachedMessage));
 
         // 2) osascript admin dialog — run bash against a temp script file.
         //    Inlining multi-line shell with nested quotes into `do shell script "..."`
@@ -1204,12 +1507,89 @@ public sealed class FirewallService
         }
     }
 
-    private static bool CommandExists(string name)
+    /// <summary>
+    /// The sudo-but-nowhere-to-show-the-dialog case, with sudo's own refusal kept so a
+    /// wrong sudoers entry is not reported as a missing one. The desktop wording named
+    /// a password dialog; read in a browser pointed at a Mac in another room, that is
+    /// not a thing the operator can act on, so the console gets the advice that fits it
+    /// with the grant already filled in for this host.
+    /// </summary>
+    private static string NoPasswordPromptText(string sudoMessage)
+    {
+        var text =
+            "The web console cannot write firewall rules: sudo wants a password, and there is nowhere " +
+            "to ask for one — the macOS admin dialog is drawn on the Mac running this console, not in " +
+            $"your browser.\n\n{HeadlessElevationHelp()}";
+        return string.IsNullOrWhiteSpace(sudoMessage) ? text : $"{text}\n\nsudo said: {sudoMessage.Trim()}";
+    }
+
+    /// <summary>
+    /// Where a firewall tool or an elevation helper is looked for. PATH first, then the
+    /// standard directories — a GUI launched from Finder inherits a minimal PATH that
+    /// omits /usr/local/bin, and a launchd job's is narrower still, while <c>pfctl</c>
+    /// lives in /sbin and the App Firewall helper under /usr/libexec.
+    /// </summary>
+    private static readonly string[] FallbackToolDirectories =
+    {
+        "/usr/local/sbin", "/usr/local/bin", "/opt/homebrew/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"
+    };
+
+    /// <summary>
+    /// Whether a command is present. This used to shell out to <c>which</c> — a process
+    /// per probe, for an answer this process can work out itself by walking PATH, and
+    /// one that <see cref="IsAdministrator"/> now asks for on every alert.
+    /// </summary>
+    private static bool CommandExists(string name) => ResolveExecutable(name) != null;
+
+    /// <summary>
+    /// Absolute path of a command, or null when it is not installed. Resolved by
+    /// walking PATH and then <see cref="FallbackToolDirectories"/> in this process.
+    /// </summary>
+    internal static string? ResolveExecutable(string name)
+    {
+        if (name.Contains('/'))
+            return IsExecutableFile(name) ? name : null;
+
+        foreach (var dir in ExecutableSearchPath())
+        {
+            var candidate = Path.Combine(dir, name);
+            if (IsExecutableFile(candidate))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>PATH, then the standard fallbacks, each directory yielded once.</summary>
+    internal static IEnumerable<string> ExecutableSearchPath()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            if (seen.Add(dir))
+                yield return dir;
+
+        foreach (var dir in FallbackToolDirectories)
+            if (seen.Add(dir))
+                yield return dir;
+    }
+
+    /// <summary>
+    /// A file that exists and carries an execute bit. The mode check matters: PATH
+    /// entries routinely hold same-named data files, and a directory named like the
+    /// tool would otherwise resolve as the tool.
+    /// </summary>
+    internal static bool IsExecutableFile(string path)
     {
         try
         {
-            var result = RunProcess("/usr/bin/which", name);
-            return result.Success;
+            if (!File.Exists(path)) return false;
+            if (OperatingSystem.IsWindows()) return true;   // no Unix mode to read
+
+            const UnixFileMode anyExecute =
+                UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+            return (File.GetUnixFileMode(path) & anyExecute) != 0;
         }
         catch
         {

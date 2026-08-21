@@ -248,6 +248,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         UpdateAutoBlockStatusText();
         RefreshFirewallRules();
         InitializeFirewallConfig();
+        NotifyUnsupportedPlatform();
         InitializeTraffic();
         _ = InitializeAllowlistAsync();
 
@@ -501,7 +502,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         if (!IsAdmin)
         {
-            AutoBlockStatusText = $"Auto-block is ON (≥ {AutoBlockMinLevel}), but firewall elevation was not available.";
+            AutoBlockStatusText = FirewallService.PlatformSupported
+                ? $"Auto-block is ON (≥ {AutoBlockMinLevel}), but firewall elevation was not available."
+                : $"Auto-block is ON (≥ {AutoBlockMinLevel}), but this OS has no firewall backend — nothing will be blocked.";
             return;
         }
 
@@ -526,7 +529,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _prevention.Enabled = value;
         PersistSettings();
         if (value && !IsAdmin)
-            FirewallMessage = "Auto-block enabled, but firewall elevation failed — try Authorize firewall.";
+            FirewallMessage = FirewallService.PlatformSupported
+                ? "Auto-block enabled, but firewall elevation failed — try Authorize firewall."
+                : FirewallService.UnsupportedPlatformText;
         else if (value)
             FirewallMessage = $"Auto-block enabled for {AutoBlockMinLevel}+ threats (password dialog may appear).";
         else
@@ -1676,8 +1681,49 @@ public partial class MainViewModel : ObservableObject, IDisposable
         return FirewallDirection.Inbound;
     }
 
+    /// <summary>
+    /// Says once, on the way in, that this OS has no firewall backend. Without it the
+    /// operator finds out by adding a rule and being asked for an admin password that
+    /// could not have helped — this is the macOS port, and there is no Linux or
+    /// Windows side to elevate into.
+    ///
+    /// Only the banner is set here; the host scan started a moment earlier owns
+    /// <see cref="FirewallConfigMessage"/> and would overwrite it. The Firewall Config
+    /// page carries the same sentence in its policy line, from the scan's own
+    /// privilege note.
+    ///
+    /// Posted rather than awaited: the constructor runs while the window is still being
+    /// built, and a dialog has nothing to centre on until it exists.
+    /// </summary>
+    private void NotifyUnsupportedPlatform()
+    {
+        if (FirewallService.PlatformSupported) return;
+
+        FirewallMessage = FirewallService.UnsupportedPlatformText;
+
+        Dispatcher.UIThread.Post(
+            () => _ = DialogService.ShowWarningAsync(
+                FirewallService.UnsupportedPlatformText,
+                "Network Sentinel runs on macOS"),
+            DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// Asks for the one authorization a firewall write needs — but only where asking
+    /// can lead anywhere. On an OS with no firewall backend the dialog used to offer an
+    /// authorization that could not succeed; it now says what is actually missing.
+    /// </summary>
     private async Task PromptElevation()
     {
+        if (!FirewallService.PlatformSupported)
+        {
+            FirewallMessage = FirewallService.UnsupportedPlatformText;
+            await DialogService.ShowWarningAsync(
+                FirewallService.UnsupportedPlatformText,
+                "Not supported on this system");
+            return;
+        }
+
         FirewallMessage = "Admin rights required for firewall changes (Mac password dialog).";
         var answer = await DialogService.ConfirmAsync(
             "Changing host firewall rules needs admin rights.\n\n" +

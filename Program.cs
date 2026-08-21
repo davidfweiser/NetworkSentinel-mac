@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Avalonia;
+using NetworkSentinel.Services;
 using NetworkSentinel.Tui;
 using NetworkSentinel.Web;
 
@@ -15,6 +16,24 @@ internal static class Program
 
     [DllImport("libc", SetLastError = true)]
     private static extern int chown(string pathname, uint owner, uint group);
+
+    /// <summary>Why this OS cannot run it, in the words the GUI also uses.</summary>
+    private static string UnsupportedOsMessage() =>
+        $"""
+        Network Sentinel (macOS) runs on macOS only.
+
+        It reads listening sockets with lsof and PF's state table, and writes rules
+        through pfctl into the com.networksentinel anchor. On
+        {RuntimeInformation.OSDescription} none of those exist, so monitoring shows
+        nothing and no firewall rule can be applied — running it as root or
+        Administrator does not change that.
+
+        Run it on a Mac. The Linux and Windows firewalls are driven by the separate
+        ports of this app.
+
+        To start the console modes anyway (they will not be able to do anything
+        useful):  NETWORKSENTINEL_ALLOW_UNSUPPORTED_OS=1
+        """;
 
     [STAThread]
     public static void Main(string[] args)
@@ -32,6 +51,27 @@ internal static class Program
         {
             PrintUsage();
             return;
+        }
+
+        // The GUI, the TUI and the web console all read this Mac's sockets and write
+        // PF rules, so none of them has anything to show on another OS. Saying so up
+        // front is the difference between "this is a macOS program" and the firewall
+        // page's old answer, which was to ask for an admin password that would not
+        // have helped.
+        //
+        // Only the console modes exit on it. The GUI carries the same sentence into
+        // the window instead (see MainViewModel's unsupported-platform notice), because
+        // exiting here would look like the app failing to start at all.
+        if (!OperatingSystem.IsMacOS() &&
+            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("NETWORKSENTINEL_ALLOW_UNSUPPORTED_OS")))
+        {
+            Console.Error.WriteLine(UnsupportedOsMessage());
+            if (WantsTui(args) || WantsWeb(args, out _) ||
+                WantsSetMasterPassword(args) || WantsSetDuckDns(args))
+            {
+                Environment.Exit(2);
+                return;
+            }
         }
 
         if (WantsSetMasterPassword(args))
@@ -102,6 +142,9 @@ internal static class Program
 
     private static void RunTui()
     {
+        // A TTY can carry sudo's own password prompt, which the GUI's dialog path
+        // cannot reach and the web console has no way to show at all.
+        FirewallService.Surface = FirewallUiSurface.Terminal;
         try
         {
             using var app = new TuiApp();
@@ -117,6 +160,10 @@ internal static class Program
 
     private static void RunWeb(int? port, WebTlsOptions? tls)
     {
+        // Nothing here can prompt: the macOS admin dialog is drawn on this Mac's own
+        // screen, and the operator is in a browser somewhere else. FirewallService
+        // reads this to refuse before the form rather than after it.
+        FirewallService.Surface = FirewallUiSurface.Web;
         try
         {
             using var app = new WebApp(port, bindAll: true, tlsOverrides: tls);
