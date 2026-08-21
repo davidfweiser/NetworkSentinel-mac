@@ -2230,6 +2230,8 @@ public sealed class WebApp : IDisposable
     --sev-high: #fa7340;
     --sev-critical: #f24059;
     --success: #4dd18c;
+    --danger-grad: linear-gradient(90deg, #ff5d78, #fa7340);
+    --accent-grad: linear-gradient(135deg, #3bc8b4, #4a9eff);
     --font: "Segoe UI", system-ui, -apple-system, sans-serif;
     --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
   }
@@ -2271,10 +2273,23 @@ public sealed class WebApp : IDisposable
   nav { display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
   .nav-cap { font-size: .62rem; font-weight: 700; letter-spacing: .09em; color: var(--muted); margin: 0 0 8px 8px; }
   nav button {
-    appearance: none; display: block; width: 100%; text-align: left;
+    appearance: none; display: flex; align-items: center; gap: 12px;
+    width: 100%; text-align: left;
     background: transparent; border: 1px solid transparent; border-radius: 10px;
     color: var(--text2); font: inherit; font-size: .84rem; font-weight: 600;
     padding: 11px 14px; margin: 3px 0; cursor: pointer; transition: .15s ease;
+  }
+  /* The ring, and the dot the checked one carries. Drawn as a radial-gradient
+     rather than an inset shadow so the dot does not have to know what colour it
+     is sitting on — the active row is tinted and the rest are not. */
+  nav button::before {
+    content: ''; flex: none; width: 15px; height: 15px; border-radius: 50%;
+    border: 2px solid var(--muted); transition: .15s ease;
+  }
+  nav button:hover::before { border-color: var(--text2); }
+  nav button.active::before {
+    border-color: var(--cyan);
+    background: radial-gradient(circle at center, var(--cyan) 0 3.5px, transparent 4px);
   }
   nav button:hover { background: rgba(255,255,255,.05); color: var(--text); }
   nav button.active { background: rgba(74,158,255,.15); color: var(--text); }
@@ -2317,25 +2332,33 @@ public sealed class WebApp : IDisposable
   .hero h1 { margin: 2px 0 0; font-size: 1.4rem; font-weight: 700; }
   .hero .lead { color: var(--text2); font-size: .8rem; margin: 4px 0 10px; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .actions button, .row-actions button, .toolbar button {
-    appearance: none; border: 1px solid var(--stroke); background: var(--bg-card);
-    color: var(--text2); border-radius: 8px; padding: 7px 12px; cursor: pointer;
-    font: inherit; font-size: .82rem; transition: .15s ease;
+  .actions button, .toolbar button, .panel-head button {
+    appearance: none; border: 1px solid var(--stroke); background: rgba(255,255,255,.10);
+    color: var(--text); border-radius: 12px; padding: 8px 12px; cursor: pointer;
+    font: inherit; font-size: .82rem; font-weight: 600; transition: .15s ease;
   }
-  .actions button:hover, .row-actions button:hover, .toolbar button:hover {
+  /* Row buttons are the desktop's mini-ghost / mini-danger: smaller, 10px radius,
+     and a shared minimum width so an Edit and a Delete line up down the column. */
+  .row-actions button {
+    appearance: none; border: 1px solid var(--stroke); background: rgba(255,255,255,.10);
+    color: var(--text); border-radius: 10px; padding: 6px 10px; min-width: 72px;
+    cursor: pointer; font: inherit; font-size: .78rem; transition: .15s ease;
+  }
+  .actions button:hover, .row-actions button:hover, .toolbar button:hover,
+  .panel-head button:hover {
     background: var(--bg-hover); color: var(--text); border-color: var(--stroke-strong);
   }
   .actions button.primary {
-    color: var(--bg-deep); font-weight: 600;
-    background: linear-gradient(135deg, var(--cyan), var(--blue));
+    color: var(--bg-deep); font-weight: 700;
+    background: var(--accent-grad);
     border: none;
   }
   .actions button.danger { border-color: rgba(255,93,120,.4); color: #ffa8b6; }
   /* Same emphasis inside a toolbar — the Firewall Config editor's save button is
      the one press that writes a kernel rule, so it should not look like Cancel. */
   .toolbar button.primary {
-    color: var(--bg-deep); font-weight: 600;
-    background: linear-gradient(135deg, var(--cyan), var(--blue));
+    color: var(--bg-deep); font-weight: 700;
+    background: var(--accent-grad);
     border: none;
   }
   /* Wake reads as the one thing worth pressing while the console is asleep. */
@@ -2400,8 +2423,29 @@ public sealed class WebApp : IDisposable
   }
   .card {
     background: var(--bg-card); border: 1px solid var(--stroke);
-    border-radius: 12px; padding: 14px 16px;
+    border-radius: 18px; padding: 14px 16px;
   }
+
+  /* A titled card holding a table, matching the desktop's Border.card (18px
+     radius, 18px padding) and its header: name, a line of context under it, and
+     the action for that section pinned to the right of the same row. */
+  .panel {
+    background: var(--bg-card); border: 1px solid var(--stroke);
+    border-radius: 18px; padding: 18px; margin-bottom: 14px;
+  }
+  .panel-head {
+    display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;
+  }
+  .panel-head .grow { flex: 1; min-width: 0; }
+  .panel-head button { flex: none; }
+  .panel-head h3 { margin: 0; font-size: .95rem; font-weight: 700; color: var(--text); }
+  .panel-sub { margin: 3px 0 0; color: var(--text2); font-size: .8rem; line-height: 1.45; }
+  .panel-sub.thin { color: var(--muted); }
+  /* Inside a panel the table is the card's contents, not its own object — the
+     desktop DataGrid is transparent over the card for the same reason. */
+  .panel table { background: transparent; border: none; border-radius: 0; }
+  .panel td.row-actions { background: var(--bg-card); }
+  .panel th { background: #222631; }
   .card .label { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; }
   .card .value { font-size: 1.55rem; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .card .value.cyan { color: var(--cyan); }
@@ -2412,8 +2456,8 @@ public sealed class WebApp : IDisposable
     margin-bottom: 12px;
   }
   .toolbar input, .toolbar select, .modal input {
-    background: var(--bg-deep); border: 1px solid var(--stroke); color: var(--text);
-    border-radius: 8px; padding: 8px 12px; font: inherit; font-size: .88rem;
+    background: rgba(255,255,255,.05); border: 1px solid var(--stroke); color: var(--text);
+    border-radius: 12px; padding: 10px 12px; font: inherit; font-size: .88rem;
     min-width: 180px;
   }
   .toolbar input:focus, .modal input:focus { outline: 1px solid var(--blue); }
@@ -2422,13 +2466,12 @@ public sealed class WebApp : IDisposable
     background: var(--bg-panel); border: 1px solid var(--stroke); border-radius: 12px;
     overflow: hidden;
   }
-  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--stroke); vertical-align: top; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,.08); vertical-align: top; }
   th {
-    color: var(--muted); font-weight: 600; font-size: .72rem;
-    text-transform: uppercase; letter-spacing: .05em; background: #12161f;
+    color: var(--text2); font-weight: 600; font-size: .78rem;
+    background: #1c2027;
     position: sticky; top: 0;
   }
-  tbody tr:nth-child(even) td { background: rgba(255,255,255,.02); }
   tr:hover td { background: rgba(24,36,63,.55); }
   tr:last-child td { border-bottom: none; }
   [data-scroll] { scrollbar-width: thin; scrollbar-color: rgba(124,249,255,.25) transparent; }
@@ -2439,13 +2482,13 @@ public sealed class WebApp : IDisposable
   /* Keep the actions column visible when wide tables scroll horizontally. */
   td.row-actions {
     position: sticky; right: 0; background: var(--bg-panel);
-    white-space: nowrap; box-shadow: -10px 0 12px -10px rgba(0,0,0,.7);
+    text-align: right; white-space: nowrap;
+    box-shadow: -10px 0 12px -10px rgba(0,0,0,.7);
   }
   table:has(td.row-actions) th:last-child {
     position: sticky; right: 0; z-index: 2;
     box-shadow: -10px 0 12px -10px rgba(0,0,0,.7);
   }
-  tbody tr:nth-child(even) td.row-actions { background: #141922; }
   tr:hover td.row-actions { background: var(--bg-hover); }
   /* IPs, ports, and timestamps must never break mid-value — wide tables
      scroll horizontally instead (the actions column stays pinned). */
@@ -2505,16 +2548,16 @@ public sealed class WebApp : IDisposable
     background: rgba(74,158,255,.16); color: #a8cfff; border: 1px solid rgba(74,158,255,.25);
   }
   .row-actions button.rm, .toolbar button.rm, button.rm-lg {
-    border-color: rgba(255,93,120,.4); color: #ffa8b6;
+    background: var(--danger-grad); border: none; color: #fff; font-weight: 600;
   }
   .row-actions button.rm:hover, .toolbar button.rm:hover, button.rm-lg:hover {
-    background: rgba(255,93,120,.12); border-color: rgba(255,93,120,.65); color: #ffd0d8;
+    background: var(--danger-grad); color: #fff; filter: brightness(1.12);
   }
   .row-actions button:disabled { opacity: .55; cursor: wait; }
   button.rm-lg {
-    appearance: none; font: inherit; font-size: .85rem; cursor: pointer;
-    padding: 8px 14px; border-radius: 8px; background: var(--bg-card);
-    border: 1px solid rgba(255,93,120,.4); transition: .15s ease; flex-shrink: 0;
+    appearance: none; font: inherit; font-size: .85rem; font-weight: 600; cursor: pointer;
+    padding: 8px 14px; border-radius: 12px; background: var(--danger-grad);
+    border: none; color: #fff; transition: .15s ease; flex-shrink: 0;
   }
   .setting-row {
     display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -2873,8 +2916,6 @@ public sealed class WebApp : IDisposable
 
   <section id="tab-fwconfig" class="hidden">
     <div class="toolbar">
-      <button id="btnAddInbound">Add an Inbound Rule</button>
-      <button id="btnAddOutbound">Add an Outbound Rule</button>
       <button id="btnRefreshFwCfg">Rescan the host firewall</button>
     </div>
     <!-- Shown only when a write cannot land. The console reads the whole ruleset
@@ -2888,9 +2929,15 @@ public sealed class WebApp : IDisposable
     </div>
     <!-- Summary, then listeners, then policy — the same three lines in the same
          order as the desktop page's header card. -->
-    <p class="muted" id="fwCfgSummary" style="margin:0 0 6px;font-size:.85rem"></p>
-    <p class="muted" id="fwCfgListeners" style="margin:0 0 6px;font-size:.85rem"></p>
-    <p class="muted" id="fwCfgPolicy" style="margin:0 0 10px;font-size:.85rem"></p>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="grow">
+          <h3>Host firewall</h3>
+          <p class="panel-sub" id="fwCfgSummary"></p>
+          <p class="panel-sub thin" id="fwCfgPolicy"></p>
+        </div>
+      </div>
+    </div>
 
     <div id="ruleEditor" class="settings-group hidden" style="margin-bottom:14px">
       <h3 id="ruleEditorTitle" style="margin:0 0 4px;font-size:.95rem">Add an Inbound Rule</h3>
@@ -2918,15 +2965,38 @@ public sealed class WebApp : IDisposable
       </div>
     </div>
 
-    <h3 style="margin:14px 0 8px;font-size:.95rem;color:var(--text2)">Inbound rules <span class="muted" id="inboundCount"></span></h3>
-    <div id="tbl-fwconfig-in"></div>
-    <h3 style="margin:18px 0 8px;font-size:.95rem;color:var(--text2)">Outbound rules <span class="muted" id="outboundCount"></span></h3>
-    <div id="tbl-fwconfig-out"></div>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="grow">
+          <h3>Inbound rules</h3>
+          <p class="panel-sub" id="inboundCount"></p>
+        </div>
+        <button id="btnAddInbound">Add an Inbound Rule</button>
+      </div>
+      <div id="tbl-fwconfig-in"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="grow">
+          <h3>Outbound rules</h3>
+          <p class="panel-sub" id="outboundCount"></p>
+        </div>
+        <button id="btnAddOutbound">Add an Outbound Rule</button>
+      </div>
+      <div id="tbl-fwconfig-out"></div>
+    </div>
     <!-- A rule list alone does not answer "is this port actually reachable" —
          the listeners and the rules above them together do. -->
-    <h3 style="margin:18px 0 8px;font-size:.95rem;color:var(--text2)">Listening services <span class="muted" id="listenerCount"></span></h3>
-    <p class="muted" id="listenHint" style="margin:0 0 10px;font-size:.85rem"></p>
-    <div id="tbl-fwconfig-listeners"></div>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="grow">
+          <h3>Listening services</h3>
+          <p class="panel-sub" id="fwCfgListeners"></p>
+          <p class="panel-sub thin" id="listenHint"></p>
+        </div>
+      </div>
+      <div id="tbl-fwconfig-listeners"></div>
+    </div>
   </section>
 
   <section id="tab-allowlist" class="hidden">
@@ -3464,9 +3534,9 @@ public sealed class WebApp : IDisposable
       ? 'No listening sockets were readable.'
       : `${listeners.length} listening socket${listeners.length === 1 ? '' : 's'} · ` +
         `${openCount} reachable from anywhere`;
-    $('inboundCount').textContent = `(${inbound.length})`;
-    $('outboundCount').textContent = `(${outbound.length})`;
-    $('listenerCount').textContent = `(${listeners.length})`;
+    const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+    $('inboundCount').textContent = plural(inbound.length, 'inbound rule');
+    $('outboundCount').textContent = plural(outbound.length, 'outbound rule');
 
     // A host this console can read but not write. Say so once at the top, and stop
     // offering buttons whose only outcome is the same failure — an editor that
@@ -3512,9 +3582,10 @@ public sealed class WebApp : IDisposable
     // retype the port, which is how ports and bind addresses go missing from the
     // rule set.
     // Same two lines the GUI's Listening services card carries, in the same order:
-    // the count and reachability, then what the table is.
+    // the count and reachability, then what the table is. The count line is now the
+    // card's own subtitle (fwCfgListeners, set above), so this says only what the
+    // table is — folding them together read as one long sentence.
     $('listenHint').textContent =
-      ($('fwCfgListeners').textContent ? $('fwCfgListeners').textContent + ' — ' : '') +
       'The same set “lsof -nP -iTCP -sTCP:LISTEN” prints, with what the inbound rules above ' +
       'do to each one. “New rule” fills the form above in with that socket’s protocol and port.';
     $('tbl-fwconfig-listeners').innerHTML = table(
