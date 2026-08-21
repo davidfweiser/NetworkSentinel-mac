@@ -3,6 +3,7 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Media;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using NetworkSentinel.ViewModels;
@@ -25,6 +26,15 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        if (DataContext is MainViewModel scaled)
+        {
+            ApplyUiScale(scaled.UiScale);
+            scaled.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(MainViewModel.UiScale))
+                    ApplyUiScale(scaled.UiScale);
+            };
+        }
         Opened += OnOpened;
         Closing += OnClosing;
         PropertyChanged += OnWindowPropertyChanged;
@@ -34,6 +44,18 @@ public partial class MainWindow : Window
             if (DataContext is MainViewModel vm)
                 vm.Dispose();
         };
+    }
+
+    /// <summary>
+    /// Draw the window at the size chosen in Settings. LayoutTransformControl scales
+    /// during measure, so this reflows rather than just magnifying, and applying it on
+    /// change means the choice lands without a restart.
+    /// </summary>
+    private void ApplyUiScale(double scale)
+    {
+        if (!double.IsFinite(scale) || scale <= 0)
+            return;
+        UiScaler.LayoutTransform = new ScaleTransform(scale, scale);
     }
 
     private void OnOpened(object? sender, EventArgs e)

@@ -20,8 +20,9 @@ public sealed class GeoIpService : IDisposable
 
     /// <summary>
     /// When false, the external geo web lookup is skipped entirely (reverse
-    /// DNS still runs). Lookups go to ipwho.is over HTTPS first; only if that
-    /// fails do they fall back to the plain-HTTP ip-api.com endpoint.
+    /// DNS still runs). Lookups go to ipwho.is first, falling back to ipapi.co —
+    /// both over HTTPS, so the peer IPs this IDS observes are never broadcast in
+    /// cleartext and an on-path attacker can't spoof the origin strings.
     /// </summary>
     public bool LookupsEnabled { get; set; } = true;
 
@@ -131,15 +132,16 @@ public sealed class GeoIpService : IDisposable
     private async Task<(string Country, string City, string Isp, double Lat, double Lon)> QueryGeoAsync(
         string ip, CancellationToken ct)
     {
-        // HTTPS endpoint first so the peer IPs we look up aren't broadcast in
-        // cleartext; the plain-HTTP ip-api.com endpoint is a fallback only.
+        // Both endpoints are HTTPS: a plain-HTTP fallback would broadcast every peer
+        // IP this IDS observes and let an on-path attacker forge the origin strings
+        // that land in threat alerts.
         try
         {
             return await QueryIpWhoIsAsync(ip, ct);
         }
         catch
         {
-            return await QueryIpApiAsync(ip, ct);
+            return await QueryIpApiCoAsync(ip, ct);
         }
     }
 
@@ -169,28 +171,32 @@ public sealed class GeoIpService : IDisposable
         return (country, city, isp, lat, lon);
     }
 
-    private async Task<(string Country, string City, string Isp, double Lat, double Lon)> QueryIpApiAsync(
+    private async Task<(string Country, string City, string Isp, double Lat, double Lon)> QueryIpApiCoAsync(
         string ip, CancellationToken ct)
     {
-        // Free non-commercial endpoint (no key). Rate-limited; we cache aggressively.
-        var url = $"http://ip-api.com/json/{ip}?fields=status,country,city,isp,lat,lon,query";
+        // Free endpoint, no key, HTTPS — ip-api.com only serves TLS on its paid tier,
+        // which is why the old fallback there was plaintext. Rate-limited; we cache
+        // aggressively.
+        var url = $"https://ipapi.co/{ip}/json/";
         using var response = await _http.GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
         var root = doc.RootElement;
 
-        if (root.TryGetProperty("status", out var status) &&
-            status.GetString() is not "success")
-        {
-            return ("", "", "", 0, 0);
-        }
+        // Errors come back as 200 with {"error": true, "reason": ...}.
+        if (root.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.True)
+            throw new InvalidOperationException("ipapi.co lookup unsuccessful");
 
-        string country = root.TryGetProperty("country", out var c) ? c.GetString() ?? "" : "";
+        // Full payloads carry country_name; abbreviated ones only the country code.
+        string country = root.TryGetProperty("country_name", out var cn) ? cn.GetString() ?? "" : "";
+        if (country.Length == 0 && root.TryGetProperty("country", out var cc))
+            country = cc.GetString() ?? "";
         string city = root.TryGetProperty("city", out var ci) ? ci.GetString() ?? "" : "";
-        string isp = root.TryGetProperty("isp", out var i) ? i.GetString() ?? "" : "";
-        double lat = root.TryGetProperty("lat", out var la) ? la.GetDouble() : 0;
-        double lon = root.TryGetProperty("lon", out var lo) ? lo.GetDouble() : 0;
+        string isp = root.TryGetProperty("org", out var i) ? i.GetString() ?? "" : "";
+        // Latitude/longitude are null (not absent) for anonymized ranges.
+        double lat = root.TryGetProperty("latitude", out var la) && la.ValueKind == JsonValueKind.Number ? la.GetDouble() : 0;
+        double lon = root.TryGetProperty("longitude", out var lo) && lo.ValueKind == JsonValueKind.Number ? lo.GetDouble() : 0;
         return (country, city, isp, lat, lon);
     }
 

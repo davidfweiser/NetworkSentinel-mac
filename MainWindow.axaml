@@ -16,6 +16,23 @@
     <vm:MainViewModel/>
   </Window.DataContext>
 
+  <!-- UI scale. Every font size in this file is an absolute device-independent
+       pixel. macOS already draws those against the display's backing scale, so
+       the default here is 1.0 — unlike the Linux build, which ships 1.75 because
+       an X11 session on an unscaled 4K panel does not. The knob is still worth
+       having: it is the one way to make the whole window bigger, and scaling
+       here beats raising the 194 FontSize literals, because the column widths,
+       paddings and the icon well are fixed too — text alone would grow into a
+       clipped layout rather than a bigger one.
+
+       LayoutTransformControl scales during layout, not just at paint, so children
+       measure against the scaled size and wrapping, trimming and scrolling all stay
+       correct. The multiplier is Settings -> Display -> Text size, persisted as
+       UiScale and applied by the code-behind, which is where the transform is set:
+       a ScaleTransform is not a StyledElement, so it inherits no DataContext and
+       cannot carry a binding of its own. -->
+  <LayoutTransformControl x:Name="UiScaler">
+
   <Grid Margin="18">
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="230" MinWidth="200" MaxWidth="280"/>
@@ -68,6 +85,7 @@
           </Border>
         </StackPanel>
 
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
         <StackPanel>
           <TextBlock Text="NAVIGATION" FontSize="10" FontWeight="Bold"
                      Foreground="{DynamicResource TextMutedBrush}" Margin="8,0,0,8"/>
@@ -97,6 +115,7 @@
                        IsChecked="{Binding ShowSettings, Mode=OneWay}"
                        Command="{Binding NavigateCommand}" CommandParameter="Settings"/>
         </StackPanel>
+        </ScrollViewer>
       </DockPanel>
     </Border>
 
@@ -135,7 +154,7 @@
           <Grid ColumnDefinitions="*,*,*,*,*" Margin="0,0,0,14">
             <Border Classes="stat" Margin="0,0,8,0">
               <StackPanel>
-                <TextBlock Text="LISTENING PORTS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}"/>
+                <TextBlock Text="LISTENING PORTS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Stats.ListeningPorts}" FontSize="26" FontWeight="Bold" Margin="0,4,0,0"
                            Foreground="{DynamicResource SuccessBrush}"/>
                 <TextBlock Text="TCP + UDP open" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="10"/>
@@ -143,7 +162,7 @@
             </Border>
             <Border Classes="stat" Grid.Column="1" Margin="0,0,8,0">
               <StackPanel>
-                <TextBlock Text="ACTIVE SESSIONS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}"/>
+                <TextBlock Text="ACTIVE SESSIONS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Stats.ActiveConnections}" FontSize="26" FontWeight="Bold" Margin="0,4,0,0"
                            Foreground="{DynamicResource AccentBlueBrush}"/>
                 <TextBlock Text="TCP connections" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="10"/>
@@ -151,7 +170,7 @@
             </Border>
             <Border Classes="stat" Grid.Column="2" Margin="0,0,8,0">
               <StackPanel>
-                <TextBlock Text="REMOTE COMPUTERS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}"/>
+                <TextBlock Text="REMOTE COMPUTERS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Stats.RemoteHosts}" FontSize="26" FontWeight="Bold" Margin="0,4,0,0"
                            Foreground="{DynamicResource AccentCyanBrush}"/>
                 <TextBlock Text="Peers tracked" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="10"/>
@@ -159,7 +178,7 @@
             </Border>
             <Border Classes="stat" Grid.Column="3" Margin="0,0,8,0">
               <StackPanel>
-                <TextBlock Text="THREAT EVENTS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}"/>
+                <TextBlock Text="THREAT EVENTS" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Stats.ThreatsToday}" FontSize="26" FontWeight="Bold" Margin="0,4,0,0"
                            Foreground="{DynamicResource AccentAmberBrush}"/>
                 <TextBlock Text="Heuristic alerts" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="10"/>
@@ -167,7 +186,7 @@
             </Border>
             <Border Classes="stat" Grid.Column="4">
               <StackPanel>
-                <TextBlock Text="HIGH / CRITICAL" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}"/>
+                <TextBlock Text="HIGH / CRITICAL" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Stats.HighThreats}" FontSize="26" FontWeight="Bold" Margin="0,4,0,0"
                            Foreground="{DynamicResource DangerBrush}"/>
                 <TextBlock Text="Needs attention" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="10"/>
@@ -882,6 +901,27 @@
             <StackPanel Spacing="14">
               <Border Classes="card">
                 <StackPanel>
+                  <TextBlock Text="Display" FontWeight="Bold" FontSize="15"/>
+                  <TextBlock Text="How this window is drawn on this screen."
+                             Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12"
+                             Margin="0,4,0,14" TextWrapping="Wrap"/>
+
+                  <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,14">
+                    <StackPanel Margin="0,0,16,0">
+                      <TextBlock Text="Text size" FontWeight="Bold" FontSize="13"/>
+                      <TextBlock Text="Scales the whole window — text, tables, charts and spacing together — so nothing is left clipped by text that outgrew it. macOS already sizes the window for the display it is on, so 100% is right on most Macs; the larger steps are for reading it from further away, or on a screen driven at a resolution that leaves the labels small. Applies straight away."
+                                 Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11"
+                                 Margin="0,2,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <ComboBox Grid.Column="1" Width="205" VerticalAlignment="Center"
+                              ItemsSource="{Binding UiScaleOptions}"
+                              SelectedItem="{Binding SelectedUiScale}"/>
+                  </Grid>
+                </StackPanel>
+              </Border>
+
+              <Border Classes="card">
+                <StackPanel>
                   <TextBlock Text="Monitoring" FontWeight="Bold" FontSize="15"/>
                   <TextBlock Text="What the monitor watches, and how often it samples."
                              Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12"
@@ -914,7 +954,7 @@
                   <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,14">
                     <StackPanel Margin="0,0,16,0">
                       <TextBlock Text="Geo lookups" FontWeight="Bold" FontSize="13"/>
-                      <TextBlock Text="Resolve country and city for remote IPs (ipwho.is over HTTPS, ip-api.com fallback). Reverse DNS still runs when this is off."
+                      <TextBlock Text="Resolve country and city for remote IPs (ipwho.is, ipapi.co fallback — both over HTTPS). Reverse DNS still runs when this is off."
                                  Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11"
                                  Margin="0,2,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
@@ -1154,7 +1194,7 @@
                              Text="{Binding TlsKeyPath}" Watermark="…/tls/myhost.duckdns.org.key"/>
                   </Grid>
 
-                  <Grid ColumnDefinitions="*,Auto">
+                  <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,14">
                     <StackPanel Margin="0,0,16,0">
                       <TextBlock Text="Redirect HTTP to HTTPS" FontWeight="Bold" FontSize="13"/>
                       <TextBlock Text="Requests that arrive by hostname get sent to the TLS port. Requests to a bare IP stay on HTTP, because the certificate only covers the name."
@@ -1163,6 +1203,17 @@
                     </StackPanel>
                     <CheckBox Grid.Column="1" VerticalAlignment="Center"
                               IsChecked="{Binding HttpsRedirect}"/>
+                  </Grid>
+
+                  <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Margin="0,0,16,0">
+                      <TextBlock Text="HTTPS only (turn off plain HTTP)" FontWeight="Bold" FontSize="13"/>
+                      <TextBlock Text="Skip the plain-HTTP listener entirely, so the master password can only cross the wire encrypted. Needs HTTPS on with a working certificate — if the certificate fails to load at startup, plain HTTP stays on so the console isn't locked out. Takes effect the next time the web console starts."
+                                 Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11"
+                                 Margin="0,2,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <CheckBox Grid.Column="1" VerticalAlignment="Center"
+                              IsChecked="{Binding HttpsOnly}"/>
                   </Grid>
 
                   <TextBlock Text="Reaching this from outside your network means anyone who guesses the master password can change this Mac's firewall. A VPN or Tailscale is safer than forwarding a port; if you do forward one, forward only the HTTPS port."
@@ -1246,4 +1297,5 @@
       </Grid>
     </Grid>
   </Grid>
+  </LayoutTransformControl>
 </Window>

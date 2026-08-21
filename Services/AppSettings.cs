@@ -166,10 +166,39 @@ public sealed class AppSettings
     public bool WebHttpsRedirect { get; set; } = true;
 
     /// <summary>
+    /// Serve the web console over HTTPS only — don't bind the plain-HTTP listener, so the
+    /// master password can never cross the wire in the clear. Honored only when
+    /// <see cref="WebHttpsEnabled"/> is on and the certificate actually loads at startup;
+    /// otherwise plain HTTP stays up so a bad certificate can't lock the console out.
+    /// </summary>
+    public bool WebHttpsOnly { get; set; }
+
+    /// <summary>
     /// Address the Let's Encrypt account is registered against. Only read the first time
     /// acme.sh is installed; kept so a retry does not ask for it again. Not a credential.
     /// </summary>
     public string AcmeAccountEmail { get; set; } = "";
+
+    /// <summary>
+    /// Multiplier the desktop window's content is drawn at. Every size in the GUI is an
+    /// absolute device-independent pixel; macOS already draws those against the display's
+    /// backing scale, so the default is 1.0 here where the Linux build ships 1.75. The knob
+    /// remains the one way to make the whole window bigger. Read through
+    /// <see cref="GetUiScale"/>, which clamps — a hand-edited 12 here would draw one stat
+    /// tile across the screen with no way back to the setting that did it.
+    /// GUI only: the TUI is sized by the terminal and the web console by the browser.
+    /// </summary>
+    public double UiScale { get; set; } = DefaultUiScale;
+
+    /// <summary>1.0 on macOS: the window server already scales for the display it is on.</summary>
+    public const double DefaultUiScale = 1.0;
+
+    public const double MinUiScale = 1.0;
+    public const double MaxUiScale = 2.5;
+
+    /// <summary>UiScale, clamped, with a non-finite or out-of-range value falling back to the default.</summary>
+    public double GetUiScale()
+        => double.IsFinite(UiScale) ? Math.Clamp(UiScale, MinUiScale, MaxUiScale) : DefaultUiScale;
 
     /// <summary>POST alerts to this webhook URL (ntfy / Slack / Discord / generic JSON). Empty = off.</summary>
     public string WebhookUrl { get; set; } = "";

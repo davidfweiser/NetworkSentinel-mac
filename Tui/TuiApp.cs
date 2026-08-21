@@ -22,12 +22,13 @@ public sealed class TuiApp : IDisposable
         Ports = 4,
         Firewall = 5,
         Allowlist = 6,
-        Help = 7
+        Settings = 7,
+        Help = 8
     }
 
     private static readonly string[] ViewNames =
     [
-        "Dashboard", "Connections", "Hosts", "Threats", "Ports", "Firewall", "Allowlist", "Help"
+        "Dashboard", "Connections", "Hosts", "Threats", "Ports", "Firewall", "Allowlist", "Settings", "Help"
     ];
 
     /// <summary>
@@ -44,7 +45,9 @@ public sealed class TuiApp : IDisposable
         AddAllowlist,
         RemoveAllowlist,
         RefreshAllowlist,
-        RestoreAllowlisted
+        RestoreAllowlisted,
+        EditSetting,
+        IssueCertificate
     }
 
     // The shared graph is built and cross-wired by SentinelCore; these are views
@@ -71,6 +74,17 @@ public sealed class TuiApp : IDisposable
     private PromptKind _pendingPrompt = PromptKind.None;
     private string _appVersion = FormatAppVersion();
 
+    /// <summary>The editable settings, built once against the same service graph.</summary>
+    private readonly TuiSettings _tuiSettings;
+
+    /// <summary>
+    /// Settings stay hidden until firewall elevation has actually been authorised
+    /// this session (or we are already root). The screen writes the same file the
+    /// desktop and web console read, so it is not something to leave open on a
+    /// terminal somebody walked away from.
+    /// </summary>
+    private bool _settingsUnlocked;
+
     public TuiApp()
     {
         _settings = _core.Settings;
@@ -78,6 +92,8 @@ public sealed class TuiApp : IDisposable
         _firewall = _core.Firewall;
         _allowlist = _core.Allowlist;
         _prevention = _core.Prevention;
+        _tuiSettings = new TuiSettings(_core);
+        _settingsUnlocked = _firewall.IsRoot;
         _autoBlockEnabled = _settings.AutoBlockEnabled;
         _autoBlockMinLevel = _settings.AutoBlockMinLevel;
         if (_autoBlockMinLevel is not (nameof(ThreatLevel.Medium) or nameof(ThreatLevel.High) or nameof(ThreatLevel.Critical)))
@@ -138,13 +154,24 @@ public sealed class TuiApp : IDisposable
                     {
                         while (_running && _pendingPrompt == PromptKind.None)
                         {
-                            HandleInput();
-                            if (!_running || _pendingPrompt != PromptKind.None)
-                                break;
-
                             ctx.UpdateTarget(BuildRoot());
                             ctx.Refresh();
-                            await Task.Delay(200);
+
+                            // Input is polled far more often than the tables are rebuilt.
+                            // Drawing and reading used to share one 200ms tick, which meant
+                            // at most five keys a second: arrow presses queued in the
+                            // terminal buffer and arrived long after the eye had moved on,
+                            // so the cursor drifted past the row you were aiming at. Now a
+                            // keypress is picked up within ~20ms and forces an immediate
+                            // redraw, while an idle screen still refreshes on the slow tick.
+                            for (var slice = 0; slice < 10; slice++)
+                            {
+                                if (HandleInput())
+                                    break;
+                                if (!_running || _pendingPrompt != PromptKind.None)
+                                    break;
+                                await Task.Delay(20);
+                            }
                         }
                     });
 
@@ -227,12 +254,25 @@ public sealed class TuiApp : IDisposable
                 host.IsBlocked = set.Contains(host.IpAddress);
         });
 
-    private void HandleInput()
+    /// <summary>
+    /// Handles every key waiting in the buffer, not one per frame. Holding an arrow
+    /// down enqueues keys faster than a frame tick can retire them, and a one-per-tick
+    /// reader turns that backlog into a cursor that keeps moving after you let go.
+    /// </summary>
+    /// <returns>True when at least one key was handled, so the caller can redraw now.</returns>
+    private bool HandleInput()
     {
-        if (_pendingPrompt != PromptKind.None || !Console.KeyAvailable)
-            return;
+        var handled = false;
+        while (_pendingPrompt == PromptKind.None && _running && Console.KeyAvailable)
+        {
+            HandleKey(Console.ReadKey(true));
+            handled = true;
+        }
+        return handled;
+    }
 
-        var key = Console.ReadKey(true);
+    private void HandleKey(ConsoleKeyInfo key)
+    {
         switch (key.Key)
         {
             case ConsoleKey.Q when key.Modifiers == ConsoleModifiers.None:
@@ -269,10 +309,21 @@ public sealed class TuiApp : IDisposable
                 break;
             case ConsoleKey.D8:
             case ConsoleKey.NumPad8:
+                SwitchView(View.Settings);
+                break;
+            case ConsoleKey.D9:
+            case ConsoleKey.NumPad9:
             case ConsoleKey.H:
             case ConsoleKey.F1:
             case ConsoleKey.Oem2 when key.Modifiers == ConsoleModifiers.Shift: // ?
                 SwitchView(View.Help);
+                break;
+
+            // Enter edits the selected setting. Toggles and choices flip in place;
+            // anything that needs typing schedules a prompt, because Spectre forbids
+            // Ask() while the Live display is running.
+            case ConsoleKey.Enter when _view == View.Settings:
+                HandleSettingsEnter();
                 break;
 
             case ConsoleKey.Tab:
@@ -408,6 +459,12 @@ public sealed class TuiApp : IDisposable
                 case PromptKind.RestoreAllowlisted:
                     RunPromptRestoreAllowlisted();
                     break;
+                case PromptKind.EditSetting:
+                    RunPromptEditSetting();
+                    break;
+                case PromptKind.IssueCertificate:
+                    await RunPromptIssueCertificateAsync();
+                    break;
             }
         }
         catch (Exception ex)
@@ -478,6 +535,7 @@ public sealed class TuiApp : IDisposable
         View.Firewall => _firewall.GetManagedRules().Count,
         View.Allowlist => FilterAllowlist().Count,
         View.Dashboard => Math.Max(FilterThreats().Count, FilterHosts().Count),
+        View.Settings => _settingsUnlocked ? _tuiSettings.Items.Count : 0,
         _ => 0
     };
 
@@ -559,8 +617,214 @@ public sealed class TuiApp : IDisposable
             _prevention.NoteElevationAuthorized();
             if (_settings.ProbeLogEnabled)
                 _firewall.EnableProbeLogging();
+            // The same password that unlocks firewall writes unlocks Settings — one
+            // authorisation, not two, and never a second password prompt of our own.
+            _settingsUnlocked = true;
         }
-        _statusMessage = result.Message;
+        _statusMessage = result.Message + (result.Success ? "  Settings (8) unlocked." : "");
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+    // The same values the desktop and web console edit, written to the same file.
+    // Enter is the only edit key: it flips a toggle, advances a choice, and opens a
+    // prompt for anything that has to be typed.
+
+    /// <summary>Row the pending edit prompt belongs to.</summary>
+    private int _pendingSettingIndex = -1;
+
+    private void HandleSettingsEnter()
+    {
+        if (!_settingsUnlocked)
+        {
+            _statusMessage = "Settings are locked — press u to authorize first.";
+            return;
+        }
+
+        var items = _tuiSettings.Items;
+        if (items.Count == 0)
+            return;
+
+        var index = Math.Clamp(_selectedIndex, 0, items.Count - 1);
+        var item = items[index];
+        switch (item.Kind)
+        {
+            case SettingKind.Toggle:
+                ApplySetting(item, item.IsOn ? "off" : "on");
+                break;
+
+            case SettingKind.Choice:
+            {
+                // Unknown current value lands on the first choice rather than throwing.
+                var at = Array.IndexOf(item.Choices, item.Read());
+                ApplySetting(item, item.Choices[(at + 1) % item.Choices.Length]);
+                break;
+            }
+
+            case SettingKind.Action:
+                _pendingPrompt = PromptKind.IssueCertificate;
+                break;
+
+            default:
+                _pendingSettingIndex = index;
+                _pendingPrompt = PromptKind.EditSetting;
+                break;
+        }
+    }
+
+    /// <summary>
+    /// A rejected value must leave the file untouched, so the catalogue throws and
+    /// nothing is saved — the footer says why instead.
+    /// </summary>
+    private void ApplySetting(SettingItem item, string value)
+    {
+        try
+        {
+            _statusMessage = item.Apply(value);
+        }
+        catch (SettingRejectedException ex)
+        {
+            _statusMessage = $"Not changed — {ex.Message}";
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Could not change {item.Label}: {ex.Message}";
+        }
+    }
+
+    private void RunPromptEditSetting()
+    {
+        var items = _tuiSettings.Items;
+        if (_pendingSettingIndex < 0 || _pendingSettingIndex >= items.Count)
+            return;
+
+        var item = items[_pendingSettingIndex];
+        _pendingSettingIndex = -1;
+
+        Console.WriteLine();
+        Console.WriteLine($"{item.Label} — {item.Description}");
+        if (item.Hint.Length > 0)
+            Console.WriteLine($"  ({item.Hint})");
+        // Enter alone keeps the current value: on a terminal, a stray Enter must not
+        // silently clear a webhook URL or a resolver list. "-" is the explicit clear.
+        Console.WriteLine("  Enter alone keeps the current value; type - to clear it.");
+        Console.Write($"{item.Label} [{item.Read()}]: ");
+
+        var line = Console.ReadLine();
+        if (line == null || line.Trim().Length == 0)
+        {
+            _statusMessage = $"{item.Label} unchanged.";
+            return;
+        }
+
+        var value = line.Trim();
+        ApplySetting(item, value == "-" ? "" : value);
+    }
+
+    /// <summary>
+    /// Let's Encrypt issuance through DuckDNS. Runs while the Live display is stopped,
+    /// because it takes minutes and its output is worth watching scroll past.
+    /// </summary>
+    private async Task RunPromptIssueCertificateAsync()
+    {
+        var (domain, token, email) = _tuiSettings.AcmeInputs;
+
+        Console.WriteLine();
+        if (domain.Length == 0 || token.Length == 0)
+        {
+            _statusMessage = "Set the DuckDNS subdomain and token first.";
+            Console.WriteLine(_statusMessage);
+            return;
+        }
+
+        if (!Confirm($"Issue a Let's Encrypt certificate for {domain}.duckdns.org? This runs for several minutes."))
+        {
+            _statusMessage = "Certificate issuance cancelled.";
+            return;
+        }
+
+        Console.WriteLine("Issuing — this waits on DuckDNS TXT propagation, so it can take a few minutes…");
+        var result = await CertIssuanceService.IssueAsync(domain, token, email);
+
+        if (result.Success && result.CertPath.Length > 0)
+        {
+            // Same as the console: fill the paths in, so the only thing left is
+            // switching HTTPS on and restarting.
+            _settings.WebTlsCertPath = result.CertPath;
+            if (result.KeyPath.Length > 0)
+                _settings.WebTlsKeyPath = result.KeyPath;
+            _settings.Save();
+            _statusMessage = $"{result.Message} Paths filled in — switch HTTPS on, then restart the console.";
+        }
+        else
+        {
+            _statusMessage = result.Message;
+        }
+
+        Console.WriteLine(_statusMessage);
+        Console.WriteLine($"Full log: {CertIssuanceService.LogPath}");
+        Console.Write("Press Enter to return… ");
+        Console.ReadLine();
+    }
+
+    private IRenderable BuildSettingsPanel()
+    {
+        if (!_settingsUnlocked)
+        {
+            // Deliberately says what to press rather than listing any values: the point
+            // of the lock is that the screen shows nothing until someone authenticates.
+            return new Panel(new Markup(
+                "[yellow]Settings are locked.[/]\n\n" +
+                "Press [cyan]u[/] to authorize firewall elevation (your Mac admin password).\n" +
+                "The same authorization unlocks this screen — settings are not shown before it.\n\n" +
+                "[dim]Running as root unlocks it without a prompt.[/]"))
+            {
+                Header = new PanelHeader("[bold]Settings[/]"),
+                Border = BoxBorder.Rounded,
+                Expand = true
+            };
+        }
+
+        var items = _tuiSettings.Items;
+        var table = new Table().Expand().Border(TableBorder.Rounded);
+        table.Title = new TableTitle($"[bold]Settings[/] ({items.Count}) — Enter edits the selected row");
+        table.AddColumns(
+            new TableColumn("").Width(2),
+            // Trimmed with an ellipsis rather than wrapped, so a row stays a row.
+            new TableColumn("Section").NoWrap(),
+            new TableColumn("Setting").NoWrap(),
+            new TableColumn("Value").NoWrap(),
+            // One line per setting: wrapping the description doubles every row's
+            // height and pushes half the catalogue off an 80-column terminal.
+            new TableColumn("What it does").NoWrap());
+
+        var visible = VisibleWindow(items.Count);
+        var lastSection = "";
+        for (var i = visible.start; i < visible.end; i++)
+        {
+            var item = items[i];
+            var selected = i == _selectedIndex;
+            var value = item.Read();
+            var shown = item.Kind switch
+            {
+                SettingKind.Toggle => value == "on" ? "[green]on[/]" : "[grey]off[/]",
+                SettingKind.Action => $"[cyan]{Markup.Escape(value)}[/]",
+                _ => Markup.Escape(Truncate(value, 28))
+            };
+
+            // The section is printed once per run of rows, so the eye can find a group
+            // without the word repeating down the whole column.
+            var section = item.Section == lastSection ? "" : item.Section;
+            lastSection = item.Section;
+
+            table.AddRow(
+                selected ? "[cyan]▶[/]" : " ",
+                $"[dim]{Markup.Escape(section)}[/]",
+                selected ? $"[cyan]{Markup.Escape(item.Label)}[/]" : Markup.Escape(item.Label),
+                shown,
+                $"[dim]{Markup.Escape(Truncate(item.Description, Math.Max(24, TermWidth - 62)))}[/]");
+        }
+
+        return table;
     }
 
     private void RunPromptBlock()
@@ -941,6 +1205,7 @@ public sealed class TuiApp : IDisposable
         View.Ports => BuildPortsTable(),
         View.Firewall => BuildFirewallPanel(),
         View.Allowlist => BuildAllowlistPanel(),
+        View.Settings => BuildSettingsPanel(),
         View.Help => BuildHelp(),
         _ => new Markup("Unknown view")
     };
@@ -1307,8 +1572,8 @@ public sealed class TuiApp : IDisposable
         var table = new Table().Border(TableBorder.Rounded).Expand();
         table.Title = new TableTitle("[bold]Keyboard shortcuts[/]");
         table.AddColumns("Key", "Action");
-        table.AddRow("1–7 / Tab", "Switch view (Dashboard…Allowlist)");
-        table.AddRow("8 / h / F1", "Help");
+        table.AddRow("1–8 / Tab", "Switch view (Dashboard…Settings)");
+        table.AddRow("9 / h / F1", "Help");
         table.AddRow("↑↓ / j k", "Move selection");
         table.AddRow("PgUp/PgDn", "Scroll selection faster");
         table.AddRow("/ or f", "Set text filter");
@@ -1318,7 +1583,8 @@ public sealed class TuiApp : IDisposable
         table.AddRow("m", "Cycle auto-block min severity");
         table.AddRow("b", "Block selected IP (or prompt)");
         table.AddRow("x", "Unblock selected IP (or prompt)");
-        table.AddRow("u", "Authorize firewall elevation (admin password)");
+        table.AddRow("u", "Authorize firewall elevation (admin password) — also unlocks Settings");
+        table.AddRow("Enter", "On Settings: flip a toggle, cycle a choice, or edit a value");
         table.AddRow("n / + / Ins", "Add domain or IP to allowlist");
         table.AddRow("d / Del", "Remove selected allowlist Domain/IP");
         table.AddRow("g", "Restore good sites (unblock allowlisted)");
@@ -1326,15 +1592,25 @@ public sealed class TuiApp : IDisposable
         table.AddRow("r", "Refresh firewall cache · on Allowlist: refresh DNS/feed");
         table.AddRow("q / Esc", "Quit");
         table.AddRow("", "[dim]Allowlist data: ~/.local/share/NetworkSentinel/allowlist.json[/]");
+        table.AddRow("", "[dim]Settings write the same settings.json the desktop and web console read.[/]");
+        table.AddRow("", "[dim]A console already running elsewhere keeps its copy until it restarts.[/]");
         return table;
     }
 
     private IRenderable BuildFooter()
     {
         var stats = _monitor.Stats;
-        var keys = _view == View.Allowlist
-            ? "[dim]7 allowlist · n/+ add domain or IP · d remove · r refresh · g restore · / filter · q quit[/]"
-            : "[dim]1-7 views · p pause · a auto · b block · n allowlist-add · u auth · / filter · h help · q quit[/]";
+        var keys = _view switch
+        {
+            View.Allowlist =>
+                "[dim]7 allowlist · n/+ add domain or IP · d remove · r refresh · g restore · / filter · q quit[/]",
+            View.Settings when !_settingsUnlocked =>
+                "[dim]8 settings · [/][yellow]locked — press u to authorize[/][dim] · h help · q quit[/]",
+            View.Settings =>
+                "[dim]8 settings · ↑↓ select · Enter edit · / filter · h help · q quit[/]",
+            _ =>
+                "[dim]1-8 views · p pause · a auto · b block · n allowlist-add · u auth · / filter · h help · q quit[/]"
+        };
 
         // Full address of the selected row so nothing is lost if a column is still tight.
         var selection = GetSelectedSummary();

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -67,6 +68,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _allowlistUseRemoteFeed = true;
     [ObservableProperty] private bool _criticalAlertsEnabled = true;
     [ObservableProperty] private string _selectedMonitorPoll = "1.2 seconds (default)";
+    [ObservableProperty] private string _selectedUiScale = "100% — as macOS sizes it (default)";
+
+    /// <summary>
+    /// The multiplier the window applies. Kept beside the label so the view has a number
+    /// to scale by without parsing display text.
+    /// </summary>
+    [ObservableProperty] private double _uiScale = AppSettings.DefaultUiScale;
     [ObservableProperty] private string _authLogStatusText = "";
     [ObservableProperty] private string _probeLogStatusText = "";
     [ObservableProperty] private string _settingsMessage = "";
@@ -91,6 +99,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _tlsCertPath = "";
     [ObservableProperty] private string _tlsKeyPath = "";
     [ObservableProperty] private bool _httpsRedirect = true;
+    [ObservableProperty] private bool _httpsOnly;
     [ObservableProperty] private bool _duckDnsEnabled;
     [ObservableProperty] private string _duckDnsDomain = "";
     [ObservableProperty] private string _duckDnsToken = "";
@@ -149,6 +158,21 @@ public partial class MainViewModel : ObservableObject, IDisposable
         nameof(ThreatLevel.High),
         nameof(ThreatLevel.Critical)
     };
+    /// <summary>
+    /// Text size for the GUI, as a percentage the label carries so the value can be read
+    /// back off it. macOS scales the window for the display already, so the hints describe
+    /// how much larger each step draws rather than naming a panel the way the Linux build
+    /// does — there, the setting exists for sessions that do not scale at all.
+    /// </summary>
+    public ObservableCollection<string> UiScaleOptions { get; } = new()
+    {
+        "100% — as macOS sizes it (default)",
+        "125% — a little larger",
+        "150% — larger",
+        "175% — much larger",
+        "200% — very large",
+        "250% — largest"
+    };
     public ObservableCollection<string> AutoBlockExpiryOptions { get; } = new()
     {
         "Never (permanent)",
@@ -185,6 +209,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _trafficMeterEnabled = _settings.TrafficMeterEnabled;
         _criticalAlertsEnabled = _settings.CriticalAlertsEnabled;
         _selectedMonitorPoll = PollMsToLabel(_settings.MonitorPollMs);
+        _uiScale = _settings.GetUiScale();
+        _selectedUiScale = ScaleValueToLabel(_uiScale);
         _threatIntelEnabled = _settings.ThreatIntelEnabled;
         _processReputationEnabled = _settings.ProcessReputationEnabled;
         _newListenerAlertsEnabled = _settings.NewListenerAlertsEnabled;
@@ -204,6 +230,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _tlsCertPath = _settings.WebTlsCertPath;
         _tlsKeyPath = _settings.WebTlsKeyPath;
         _httpsRedirect = _settings.WebHttpsRedirect;
+        _httpsOnly = _settings.WebHttpsOnly;
         _duckDnsEnabled = _duckDns.Config.Enabled;
         _duckDnsDomain = _duckDns.Config.Domain;
         _duckDnsToken = _duckDns.Config.Token;
@@ -707,6 +734,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SettingsMessage = $"Monitor poll interval: {value}";
     }
 
+    partial void OnSelectedUiScaleChanged(string value)
+    {
+        var scale = ScaleLabelToValue(value);
+        UiScale = scale;
+        _settings.UiScale = scale;
+        _settings.Save();
+        SettingsMessage = $"Text size: {value}";
+    }
+
     partial void OnThreatIntelEnabledChanged(bool value)
     {
         _monitor.ThreatIntelEnabled = value;
@@ -849,6 +885,23 @@ public partial class MainViewModel : ObservableObject, IDisposable
         }
 
         RefreshRemoteAccessStatus(reloadCertificate: true);
+    }
+
+    partial void OnHttpsOnlyChanged(bool value)
+    {
+        if (value && !_settings.WebHttpsEnabled)
+        {
+            SettingsMessage = "Switch HTTPS on first — turning off plain HTTP without it would leave no console at all.";
+            HttpsOnly = false;
+            return;
+        }
+
+        _settings.WebHttpsOnly = value;
+        _settings.Save();
+        SettingsMessage = value
+            ? "Web console will serve HTTPS only — restart the web console to apply. If the certificate fails to load at startup, plain HTTP stays on so the console stays reachable."
+            : "Web console will serve plain HTTP alongside HTTPS — restart the web console to apply.";
+        RefreshRemoteAccessStatus();
     }
 
     partial void OnHttpsRedirectChanged(bool value)
@@ -996,6 +1049,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 _settings.WebTlsPfxPassword, out var cert, out var error))
         {
             var text = $"HTTPS ready on port {_settings.WebHttpsPort} — certificate expires {cert!.NotAfter:yyyy-MM-dd}.";
+            if (_settings.WebHttpsOnly)
+                text += " Plain HTTP is off (HTTPS only).";
             cert.Dispose();
             return text;
         }
@@ -1100,6 +1155,34 @@ public partial class MainViewModel : ObservableObject, IDisposable
         "10 seconds" => 10_000,
         _ => NetworkMonitorService.DefaultPollIntervalMs
     };
+
+    /// <summary>
+    /// The percentage the label opens with, so the option list stays the single place the
+    /// steps are written down — adding one there needs no change here.
+    /// </summary>
+    private static double ScaleLabelToValue(string? label)
+    {
+        var digits = new string((label ?? string.Empty).TakeWhile(char.IsDigit).ToArray());
+        return int.TryParse(digits, out var percent)
+            ? Math.Clamp(percent / 100.0, AppSettings.MinUiScale, AppSettings.MaxUiScale)
+            : AppSettings.DefaultUiScale;
+    }
+
+    /// <summary>
+    /// Nearest listed step, so a settings.json hand-edited to something between them still
+    /// selects an entry instead of leaving the box blank.
+    /// </summary>
+    private string ScaleValueToLabel(double scale)
+    {
+        var best = UiScaleOptions[0];
+        var bestGap = double.MaxValue;
+        foreach (var option in UiScaleOptions)
+        {
+            var gap = Math.Abs(ScaleLabelToValue(option) - scale);
+            if (gap < bestGap) { bestGap = gap; best = option; }
+        }
+        return best;
+    }
 
     private static string PollMsToLabel(int ms) => ms switch
     {

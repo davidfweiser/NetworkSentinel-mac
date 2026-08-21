@@ -146,6 +146,7 @@ public sealed class WebApp : IDisposable
     private TlsCertificateProvider? _tls;
     private int _httpsPort;
     private bool _httpsActive;
+    private bool _httpOff;
     private CancellationTokenSource? _cts;
     private string _statusMessage = "Web UI ready — monitoring started.";
     private bool _autoBlockEnabled;
@@ -235,7 +236,9 @@ public sealed class WebApp : IDisposable
         {
             // ResolvePort only guarantees the HTTP port is free — the HTTPS port is whatever
             // was configured, so name both rather than blaming the one that is probably fine.
-            var ports = _httpsActive ? $"port {_port} (HTTP) or {_httpsPort} (HTTPS)" : $"port {_port}";
+            var ports = _httpOff ? $"port {_httpsPort} (HTTPS)"
+                : _httpsActive ? $"port {_port} (HTTP) or {_httpsPort} (HTTPS)"
+                : $"port {_port}";
             throw new InvalidOperationException(
                 $"Failed to bind web UI on {ports}. Try another port with -w PORT " +
                 (_httpsActive ? "or --https-port PORT " : "") +
@@ -276,6 +279,10 @@ public sealed class WebApp : IDisposable
 
         var tlsError = ConfigureTls();
 
+        // HTTPS-only skips the plain-HTTP listener — but only when TLS actually came up.
+        // A certificate problem must degrade to HTTP with a warning, never to no console.
+        _httpOff = _settings.WebHttpsOnly && _httpsActive;
+
         builder.WebHost.ConfigureKestrel(options =>
         {
             // The request handler writes responses synchronously (Stream.Write / ReadToEnd).
@@ -284,7 +291,8 @@ public sealed class WebApp : IDisposable
             options.Limits.MaxRequestBodySize = 1 * 1024 * 1024;
             options.AddServerHeader = false;
 
-            options.Listen(bindAddress, _port);
+            if (!_httpOff)
+                options.Listen(bindAddress, _port);
 
             if (_httpsActive && _tls != null)
             {
@@ -306,6 +314,8 @@ public sealed class WebApp : IDisposable
 
         if (tlsError != null)
             Console.Error.WriteLine($"HTTPS disabled: {tlsError}");
+        if (_settings.WebHttpsOnly && !_httpOff)
+            Console.Error.WriteLine("HTTPS-only is set, but HTTPS is not running — serving plain HTTP so the console stays reachable.");
 
         return app;
     }
@@ -350,12 +360,27 @@ public sealed class WebApp : IDisposable
     {
         Console.WriteLine();
         var scope = _listeningLocalOnly ? "localhost only" : (_bindAll ? "all interfaces" : "localhost only");
-        Console.WriteLine($"  Listening on port {_port}  ({scope})");
-        Console.WriteLine($"  Local:   http://127.0.0.1:{_port}/");
-        if (_bindAll && !_listeningLocalOnly)
+        if (_httpOff)
         {
-            foreach (var ip in GetLanIpv4Addresses().Take(4))
-                Console.WriteLine($"  Network: http://{ip}:{_port}/");
+            // No HTTP listener at all, so the banner has to hand out working HTTPS URLs —
+            // the bare-IP ones get a certificate warning, but they connect encrypted.
+            Console.WriteLine($"  Listening on port {_httpsPort}  ({scope}) — HTTPS only, plain HTTP is off");
+            Console.WriteLine($"  Local:   https://127.0.0.1:{_httpsPort}/");
+            if (_bindAll && !_listeningLocalOnly)
+            {
+                foreach (var ip in GetLanIpv4Addresses().Take(4))
+                    Console.WriteLine($"  Network: https://{ip}:{_httpsPort}/");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"  Listening on port {_port}  ({scope})");
+            Console.WriteLine($"  Local:   http://127.0.0.1:{_port}/");
+            if (_bindAll && !_listeningLocalOnly)
+            {
+                foreach (var ip in GetLanIpv4Addresses().Take(4))
+                    Console.WriteLine($"  Network: http://{ip}:{_port}/");
+            }
         }
 
         if (_httpsActive)
@@ -782,10 +807,15 @@ public sealed class WebApp : IDisposable
     private string HttpsStatusText()
     {
         if (_httpsActive)
-            return _tls?.Status ?? $"HTTPS: serving on port {_httpsPort}";
+        {
+            var status = _tls?.Status ?? $"HTTPS: serving on port {_httpsPort}";
+            return _httpOff ? $"{status} Plain HTTP is off — this console is HTTPS-only." : status;
+        }
         if (!_settings.WebHttpsEnabled)
             return "HTTPS: off — this page is served over plain HTTP.";
-        return "HTTPS: enabled in settings but not running — restart the web console.";
+        return _settings.WebHttpsOnly
+            ? "HTTPS: enabled in settings but not running — plain HTTP stays on so this page is reachable. Restart the web console."
+            : "HTTPS: enabled in settings but not running — restart the web console.";
     }
 
     /// <summary>Copy of the live DuckDNS config so a partial edit keeps the fields it did not touch.</summary>
@@ -1238,6 +1268,15 @@ public sealed class WebApp : IDisposable
                                 ? "Hostname requests over plain HTTP will redirect to HTTPS."
                                 : "HTTP requests are served as-is (no HTTPS redirect).";
                             break;
+                        case "httpsOnly":
+                            if (on && !_settings.WebHttpsEnabled)
+                                return ActionResultDto.Fail(
+                                    "Switch HTTPS on first — turning off plain HTTP without it would leave no console at all.");
+                            _settings.WebHttpsOnly = on;
+                            label = on
+                                ? "Plain HTTP will be off (HTTPS only) — restart the web console to apply. If the certificate fails to load at startup, HTTP stays on so you aren't locked out."
+                                : "Plain HTTP will be served alongside HTTPS — restart the web console to apply.";
+                            break;
 
                         // --- DuckDNS (stored separately in duckdns.json, mode 0600) ---
                         case "duckDnsEnabled":
@@ -1669,6 +1708,7 @@ public sealed class WebApp : IDisposable
                 httpsActive = _httpsActive,
                 httpsPort = _settings.WebHttpsPort,
                 httpsRedirect = _settings.WebHttpsRedirect,
+                httpsOnly = _settings.WebHttpsOnly,
                 httpsStatus = HttpsStatusText(),
                 tlsCertPath = _settings.WebTlsCertPath,
                 tlsKeyPath = _settings.WebTlsKeyPath,
@@ -2359,6 +2399,46 @@ public sealed class WebApp : IDisposable
     display: flex; justify-content: space-between; gap: 12px;
     color: var(--muted); font-size: .74rem; padding: 6px 2px 2px;
   }
+  /* DASHBOARD ROWS — a wide chart beside the one number that summarises it,
+     the pairing the desktop window uses. Under 900px the panel drops below the
+     chart rather than squeezing two unreadable columns onto a phone. */
+  .dash-row {
+    display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: stretch;
+  }
+  @media (max-width: 900px) { .dash-row { grid-template-columns: 1fr; } }
+  .side-panel {
+    background: var(--bg-panel); border: 1px solid var(--stroke);
+    border-radius: 12px; padding: 14px 16px;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .side-panel.intensity {
+    align-items: center; text-align: center;
+    background: linear-gradient(150deg, rgba(59,200,180,.10), rgba(74,158,255,.05) 60%, transparent);
+  }
+  .side-panel .pulse {
+    width: 72px; height: 72px; border-radius: 50%; margin-bottom: 12px;
+    border: 2px solid var(--cyan); background: rgba(59,200,180,.15);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: .95rem; color: var(--cyan); letter-spacing: .04em;
+  }
+  /* Asleep must not read as LIVE — the number below it is then a stale count. */
+  .side-panel .pulse.idle {
+    border-color: var(--muted); color: var(--muted); background: rgba(255,255,255,.04);
+  }
+  .side-panel .side-title { font-weight: 650; }
+  .side-panel .side-sub { color: var(--text2); font-size: .78rem; }
+  .side-panel .side-kicker {
+    color: var(--muted); font-size: .68rem; font-weight: 700; letter-spacing: .06em;
+  }
+  .side-panel .side-month { font-size: .95rem; font-weight: 600; margin-bottom: 8px; }
+  .side-panel .big {
+    font-size: 1.75rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15;
+  }
+  .side-panel .big.danger { color: var(--danger); }
+  .side-panel .big.blue { color: var(--blue); }
+  .side-panel .big.cyan { color: var(--cyan); }
+  .side-panel .side-foot { font-size: .74rem; color: var(--text2); }
+  .side-panel .side-foot.dim { color: var(--muted); }
   .chip {
     display: inline-block; padding: 1px 8px; border-radius: 999px; margin-right: 4px;
     font-size: .72rem; font-weight: 600;
@@ -2646,12 +2726,37 @@ public sealed class WebApp : IDisposable
   <section id="tab-dashboard">
     <div class="cards" id="cards"></div>
     <h3 style="margin:18px 0 8px;font-size:.95rem;color:var(--text2)">Activity — last 5 minutes</h3>
-    <div class="chart-card" id="dash-chart"></div>
+    <div class="dash-row">
+      <div class="chart-card" id="dash-chart"></div>
+      <!-- The desktop's threat-intensity hero: the high/critical count on its own,
+           away from the four tiles it otherwise hides among. -->
+      <div class="side-panel intensity">
+        <div class="pulse" id="intensityPulse">LIVE</div>
+        <div class="side-title">Threat intensity</div>
+        <div class="big danger" id="intensityValue">0</div>
+        <div class="side-sub">high-severity signals</div>
+      </div>
+    </div>
     <h3 style="margin:18px 0 8px;font-size:.95rem;color:var(--text2)">
       Data flow <span class="muted" id="traffic-window" style="font-weight:400"></span>
     </h3>
-    <div class="chart-card" id="dash-traffic"></div>
-    <div class="toolbar" style="margin-top:10px">
+    <div class="dash-row">
+      <div class="chart-card" id="dash-traffic"></div>
+      <!-- The running month's totals, which the data-flow footer states in a
+           sentence too long to read at a glance. -->
+      <div class="side-panel">
+        <div class="side-kicker">THIS MONTH</div>
+        <div class="side-month" id="monthLabel">—</div>
+        <div class="side-sub">Data in</div>
+        <div class="big blue" id="monthIn">—</div>
+        <div class="side-sub" style="margin-top:6px">Data out</div>
+        <div class="big cyan" id="monthOut">—</div>
+        <div class="side-foot" style="margin-top:10px" id="monthTotal"></div>
+        <div class="side-foot dim" id="monthAvg"></div>
+      </div>
+    </div>
+    <h3 style="margin:18px 0 4px;font-size:.95rem;color:var(--text2)">Monthly data in and out</h3>
+    <div class="toolbar" style="margin-top:6px">
       <span class="muted" style="font-size:.85rem">Totals by</span>
       <select id="trafficRange">
         <option value="days">This month, by day</option>
@@ -3202,6 +3307,17 @@ public sealed class WebApp : IDisposable
     $('dash-traffic').innerHTML = trafficChartHtml(tr);
     $('traffic-window').textContent = tr.window ? '— ' + tr.window : '';
 
+    // The same five month fields the footer sentence uses, given room to be read.
+    // Em dashes rather than zeros while the meter is off: nothing was measured.
+    const metered = tr.enabled !== false;
+    $('monthLabel').textContent = tr.monthLabel || '—';
+    $('monthIn').textContent = metered ? (tr.monthIn || '—') : '—';
+    $('monthOut').textContent = metered ? (tr.monthOut || '—') : '—';
+    $('monthTotal').textContent = metered
+      ? (tr.monthTotal ? tr.monthTotal + ' total' : '')
+      : 'Traffic metering is off';
+    $('monthAvg').textContent = metered ? (tr.monthDailyAverage || '') : '';
+
     const useMonths = $('trafficRange').value === 'months';
     const buckets = (useMonths ? tr.months : tr.days) || [];
     $('dash-traffic-bars').innerHTML = trafficBarsHtml(buckets);
@@ -3489,6 +3605,18 @@ public sealed class WebApp : IDisposable
       </div>`).join('');
 
     $('dash-chart').innerHTML = chartHtml(state.activity || []);
+
+    // Threat intensity reads LIVE only while something is actually watching;
+    // asleep, the count below it is a leftover, not a measurement.
+    const watching = !!(state.settings && state.settings.isMonitoring);
+    const pulse = $('intensityPulse');
+    pulse.textContent = watching ? 'LIVE' : 'IDLE';
+    pulse.classList.toggle('idle', !watching);
+    pulse.title = watching
+      ? 'Monitoring — high and critical signals are being counted live'
+      : 'Asleep — this count is the last one measured';
+    $('intensityValue').textContent = s.highThreats ?? 0;
+
     renderTraffic();
 
     const threats = state.threats || [];
@@ -3676,7 +3804,7 @@ public sealed class WebApp : IDisposable
       <div class="settings-group"><h3>Monitoring</h3>
         ${row('Live monitoring', 'Watch connections, listening ports, and threats in real time. Switching this off is the same as the Sleep button in the header — every watcher stops until you wake it again. Firewall blocks stay in force either way.', sw('monitoring', s.isMonitoring))}
         ${row('Page refresh speed', 'How often live tabs (Dashboard, Connections, Hosts…) update in this browser.', refreshSel)}
-        ${row('Geo lookups', 'Resolve country and city for remote IPs (ipwho.is over HTTPS, ip-api.com fallback).', sw('geoLookupEnabled', s.geoLookupEnabled))}
+        ${row('Geo lookups', 'Resolve country and city for remote IPs (ipwho.is, ipapi.co fallback — both over HTTPS).', sw('geoLookupEnabled', s.geoLookupEnabled))}
         ${row('Auth-log monitoring', 'Watch the macOS unified log (sshd, sudo, login, Screen Sharing) for failed logons and alert on brute-force bursts. ' + (s.authLogStatus || ''), sw('authLogMonitorEnabled', s.authLogMonitorEnabled))}
         ${row('Closed-port scan detection', 'Install a PF SYN-log rule and decode pflog0 (needs admin rights) — catches port scans of closed ports that never appear as connections. ' + (s.probeLogStatus || ''), sw('probeLogEnabled', s.probeLogEnabled))}
         ${row('Traffic metering', 'Sample the interface byte counters (netstat -ib) for the dashboard\'s data-flow charts and the monthly in/out history. Physical interfaces only, so VPN and container traffic is counted once. ' + (s.trafficStatus || ''), sw('trafficMeterEnabled', s.trafficMeterEnabled))}
@@ -3717,6 +3845,7 @@ public sealed class WebApp : IDisposable
         ${row('Certificate (PEM fullchain or .pfx)', 'Filled in by Issue certificate; edit it if the certificate lives somewhere else.', txt('tlsCertPath', s.tlsCertPath || '', '…/tls/myhost.duckdns.org.fullchain.cer'))}
         ${row('Private key (PEM)', 'Full path to the private key. Leave empty when the certificate is a .pfx bundle.', txt('tlsKeyPath', s.tlsKeyPath || '', '/etc/networksentinel/privkey.key'))}
         ${row('Redirect HTTP to HTTPS', 'Requests that arrive by hostname get sent to the TLS port. Requests to a bare IP stay on HTTP — the certificate only covers the name.', sw('httpsRedirect', s.httpsRedirect))}
+        ${row('HTTPS only (turn off plain HTTP)', 'Skip the plain-HTTP listener entirely, so the master password can only cross the wire encrypted. Needs HTTPS on with a working certificate — if the certificate fails to load at startup, plain HTTP stays on so this console is not locked out. Takes effect when the web console restarts.', sw('httpsOnly', s.httpsOnly))}
         ${row('DuckDNS dynamic DNS', 'Keep a free duckdns.org hostname pointed at this machine so it stays reachable when your ISP changes your IP.', sw('duckDnsEnabled', s.duckDnsEnabled))}
         ${row('DuckDNS subdomain', 'Just the label — "myhost" for myhost.duckdns.org.', txt('duckDnsDomain', s.duckDnsDomain || '', 'myhost'))}
         ${row('DuckDNS token', 'Account token from duckdns.org. Stored owner-only on disk and never sent back to this page. ' + (s.duckDnsTokenSet ? 'A token is saved — replace the placeholder to change it, or empty the field to remove it.' : 'No token saved yet.'), txt('duckDnsToken', s.duckDnsTokenSet ? '••••••••' : '', 'paste token'))}
