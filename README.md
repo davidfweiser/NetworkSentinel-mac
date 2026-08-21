@@ -4,7 +4,7 @@ Native **macOS** desktop app for **live network monitoring**, **data-flow meteri
 
 > **Host-based** intrusion detection and prevention. It detects on its own heuristics and, with Suricata attached (0.6.x), on signature/payload inspection — then enforces in the kernel via **PF**. It is not an inline network appliance: it protects the Mac it runs on, not a segment, and it does not sit in the forwarding path.
 
-macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.5**.
+macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.13**.
 
 ---
 
@@ -187,7 +187,7 @@ Rules land in the same PF anchor and the same `firewall-rules.json` ledger as ev
 
 **The list survives a firewall it cannot read** (0.7.4). Listeners come from `lsof`, which reports your own sockets with no elevation at all, but the scan used to throw them away whenever neither PF nor the Application Firewall returned any state — emptying the table on exactly the Macs where it matters most: an unprivileged run, or a Mac with PF off and the Application Firewall never switched on. The verdict column reads **No firewall** there, which is the answer.
 
-**Both front-ends say the same thing (0.7.5).** The desktop window and the web console build the same three lines from the same fields, in the same order — summary, listening sockets, policy. The desktop gained the *Scanned HH:mm:ss, not live* stamp the console had, so a page read an hour ago says so rather than passing for current; the console gained the listening-socket count and how many of them are reachable from anywhere, which the desktop had; and the console's policy paragraph moved below the summary, where the desktop keeps it. The sentence describing what the listener table is, is now one sentence written once and shown in both.
+**Both front-ends say the same thing (0.7.5).** The desktop window and the web console build the same three lines from the same fields, in the same order — summary, listening sockets, policy. The desktop gained the *Scanned HH:mm:ss, not live* stamp the console had, so a page read an hour ago says so rather than passing for current; the console gained the listening-socket count and how many of them are reachable from anywhere, which the desktop had; and the console's policy paragraph moved below the summary, where the desktop keeps it. The sentence describing what the listener table is, is now one sentence written once and shown in both. Since 0.7.12 the console's page is also *shaped* like the desktop's rather than only worded like it — see [Layout](#layout-073).
 
 **Nothing is cut off (0.7.5).** The Firewall Config grids were the only ones in the app not trimming their cells, so a long rule label or an IPv6 range stopped mid-value with no ellipsis and no way to read the rest. Every cell trims now, and the columns whose values are routinely wider than any sensible column — label, addresses, created-by, process, bind address — carry the full value as a tooltip. Label and addresses share the leftover width rather than one of them being pinned narrow. The action column sizes to its two buttons instead of the 150px it was pinned at, which had been slicing the rounded edge off **Delete**; and the rail title wraps rather than reading "Network Sentine".
 
@@ -223,10 +223,12 @@ Trusted sites are protected so auto-block (and manual block) will not cut off ev
 
 ## Requirements
 
-- **macOS** 12+ (Apple Silicon or Intel)
+- **macOS 12+ only** (Apple Silicon or Intel). There is no Linux or Windows build here: the monitor reads this Mac's sockets with `lsof` and PF's state table, and the firewall is `pfctl` and the `com.networksentinel` anchor — none of which another OS has, so no privilege level there could apply a rule. The Linux and Windows firewalls are driven by the separate ports of this app. Since 0.7.9 the console modes say that and refuse to start rather than asking to be elevated, and the GUI carries the same sentence into the window
 - [.NET 8 SDK or runtime](https://dotnet.microsoft.com/download) (or use a self-contained publish)
 - Avalonia desktop dependencies (bundled with the runtime on macOS)
-- Admin rights (password dialog) for PF firewall changes
+- Admin rights (password dialog) for PF firewall changes — except from the web console, which cannot raise one: see [Firewall elevation on a headless Mac](#firewall-elevation-on-a-headless-mac)
+- **Text size (0.7.13).** Every size in the GUI is an absolute device-independent pixel. macOS already draws those against the display's backing scale, so 100% is right on most Macs and is the default here — the Linux build ships 1.75 because an X11 session on an unscaled 4K panel does not scale at all. The knob is still the one way to make the whole window bigger: **Settings → Display → Text size** offers six steps up to 250%, applies straight away, and persists as `UiScale` in `settings.json`, clamped to 1.0–2.5 on read. The window is drawn through a `LayoutTransformControl`, which scales during layout rather than at paint, so wrapping, trimming and the table columns all stay correct — the window gets bigger rather than clipped. GUI only: the TUI is sized by the terminal and the web console by the browser
+- No `which` binary is needed: `sudo`, `osascript` and `pfctl` are resolved in-process against `PATH` plus `/usr/local/sbin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/usr/sbin`, `/usr/bin`, `/sbin` and `/bin` — a GUI launched from Finder inherits a minimal `PATH`, and a launchd job's is narrower still
 - Optional, each enabling one detector: `brew install suricata` (signature alerts), `brew install wireguard-tools` (peer monitoring). PF flow events and DNS hygiene additionally need PF enabled and **silent** root — see [PF flow events](#pf-flow-events)
 
 ---
@@ -252,7 +254,7 @@ dotnet run -c Release -- --tui
 
 | Key | Action |
 |-----|--------|
-| `1`–`7` / `Tab` | Dashboard · Connections · Hosts · Threats · Ports · Firewall · **Allowlist** |
+| `1`–`8` / `Tab` | Dashboard · Connections · Hosts · Threats · Ports · Firewall · Allowlist · **Settings** |
 | `↑` `↓` / `j` `k` | Move selection |
 | `/` or `f` | Filter |
 | `p` | Pause / resume monitoring |
@@ -262,11 +264,41 @@ dotnet run -c Release -- --tui
 | `n` / `+` | **Add domain or IP to allowlist** (never block) |
 | `d` | Remove selected allowlist Domain/IP (on Allowlist view) |
 | `g` | Restore good sites (unblock allowlisted IPs) |
-| `u` | Authorize firewall elevation (admin password) |
+| `u` | Authorize firewall elevation (admin password) — **also unlocks Settings** |
+| `Enter` | On **Settings**: flip a toggle, cycle a choice, or edit a value |
 | `c` | Clear threat alerts |
 | `r` | Refresh firewall · on Allowlist: refresh DNS/feed |
 | `h` / `F1` | Help |
 | `q` | Quit |
+
+#### Settings from the terminal (0.7.8)
+
+The TUI could watch and block but not configure: every setting meant reaching for
+the desktop window or the web console, neither of which exists on a headless Mac
+you only ever meet over SSH. **Settings** is the eighth view, and it carries the
+same catalogue the web console's Settings tab does — monitoring and poll interval,
+every detector and its thresholds, auto-block and its severity, direction, dry run
+and rule expiry, the webhook, and the whole remote-access group: HTTPS, port, TLS
+paths, redirect, HTTPS-only, DuckDNS, and Let's Encrypt issuance.
+
+**It is locked until you authorize.** The screen shows nothing — not even current
+values — until firewall elevation has been authorized this session with `u`, or the
+TUI is already running as root. One password, not two: the same authorization that
+lets the firewall be written unlocks the screen, because a settings page left open
+on an unattended terminal is the same exposure as a firewall left writable.
+
+**Enter is the only edit key.** It flips a toggle and cycles a choice in place;
+anything that has to be typed opens a prompt below the display, seeded with the
+current value. In that prompt **Enter alone keeps the value and `-` clears it** —
+on a terminal, a stray Return must not silently empty a webhook URL. A rejected
+value (a port out of range, a certificate path that does not exist) is reported in
+the footer and **nothing is written**, so a bad entry cannot leave the file half
+changed.
+
+Each change is pushed into the running service *and* saved, the way the web console
+applies them, so a detector switched on here starts working without a restart. The
+file is the same `settings.json` the desktop and web console read — but a console
+already running in another process keeps its in-memory copy until it restarts.
 
 ### Headless web console
 
@@ -288,9 +320,36 @@ wording under it). To the right, the same hero header the desktop carries: clock
 `high/critical · blocked · auto-block` subtitle built from the same three numbers, and the action row. Below ~900 px
 the rail folds into a wrapping row above the content.
 
+**And drawn like it too (0.7.12).** Matching the shape left the two still looking
+unrelated, so the console's styling is now taken from the values in the desktop's
+`Themes/Controls.axaml` and `Themes/Colors.axaml` — the 18 px card radius and padding,
+the danger gradient's two stops — rather than approximated by eye. They are still two
+stylesheets in two languages and can drift if only one is edited; the point is that
+where they agree today, they agree on a number someone can look up. Rail entries draw
+the ring and dot of the RadioButton they have always been, with the selected one
+filled. A list is a card carrying its name, a line of context under it, and that
+section's action on the right of the same row — so **Add an Inbound Rule** sits on the
+list it adds to instead of in a strip above everything. Column headers are sentence
+case as the grid draws them, not uppercase; the zebra banding is gone for the flat card
+and horizontal rules the desktop uses; and row buttons are the desktop's mini-ghost and
+mini-danger, which makes **Delete** the solid danger gradient rather than an outline.
+
+**The dashboard boxes the desktop had (0.7.7).** Two panels the desktop window carried
+and the console did not: **Threat intensity**, the high/critical count on its own beside
+the activity chart, and **This month**, the running month's data in and out beside the
+data-flow chart. Neither needed a new API field — the console was already sending all
+five month values and spending them on the footer sentence under the chart, which is
+too long to read at a glance. The console's pulse reads **IDLE** rather than LIVE while
+asleep, because the count beneath it is then the last one measured rather than a live
+one; the desktop has no sleep mode and so no equivalent. With metering off the month box
+shows em dashes rather than zeros, because nothing was measured. The monthly bar chart,
+which the console already drew unlabelled, gained the desktop's **Monthly data in and
+out** heading above its range dropdown. Below 900 px each pair stacks instead of
+splitting the width between two unreadable columns.
+
 | Tab | What you can do |
 |-----|-----------------|
-| **Dashboard** | Live counters, **5-minute activity chart** (connections + threat markers), **data-flow charts** (0.7.1), monitoring/firewall status, recent threats |
+| **Dashboard** | Live counters, **5-minute activity chart** (connections + threat markers) beside **Threat intensity**, **data-flow charts** (0.7.1) beside the running month's totals, **Monthly data in and out**, monitoring/firewall status, recent threats |
 | **Live Connections / Break-in Attempts** | Live traffic with a **Block** button on every row |
 | **Remote Computers** | Remote peers; block / unblock by row or by typed IP |
 | **Open Ports** | Local listeners; one-click **Block port** |
@@ -299,7 +358,7 @@ the rail folds into a wrapping row above the content.
 | **Allowlist** | Add/remove trusted domains and IPs; refresh the feed |
 | **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **Suricata alerts**, **WireGuard peer watch**, **PF flow events**, **DNS hygiene**, **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity + **dry run**, block direction, allowlist feed, **change master password**, **Remove all rules** |
 
-The navigation rail shows the running version (e.g. `v0.7.5`) — check it after an upgrade to confirm the new build
+The navigation rail shows the running version (e.g. `v0.7.13`) — check it after an upgrade to confirm the new build
 is live. Since 0.7.2 the console notices this for you: a tab left open across an upgrade shows a banner naming both
 versions and offering a reload, because the page polls `/api/state` but never re-requests its own HTML, so the old UI
 would otherwise stay put and look like the upgrade never installed. It never reloads on its own — you may be
@@ -339,6 +398,8 @@ Failed password attempts are throttled **per client IP**: five wrong guesses tri
 ### HTTPS and remote access (0.5.0)
 
 The console is served by **Kestrel**, so it can terminate TLS itself (macOS `HttpListener` cannot). HTTP and HTTPS are served side by side: the LAN keeps working on plain HTTP while requests that arrive **by hostname** are redirected to TLS — requests to a bare IP are left alone, since the certificate only covers the name.
+
+Once HTTPS works, **Settings → Remote access → HTTPS only** (0.7.6) turns the plain-HTTP listener off entirely, so the master password can never cross the wire in the clear — the strongest setting for a console reachable beyond localhost, and the one that closes the bare-IP gap above, since there is no HTTP listener left to hit. Bare-IP visits then get a certificate warning but still connect encrypted. The switch is deliberately fail-open: it is honored only when the certificate actually loads at startup, so a broken or expired cert means the console falls back to plain HTTP (with a warning in the banner and on the settings page) instead of leaving you locked out.
 
 ```bash
 ./NetworkSentinel -w --https \
@@ -412,8 +473,8 @@ Self-contained (no system .NET runtime needed):
 `package.sh` produces `dist/networksentinel-<version>-<rid>.tar.gz` plus a ready `dist/Network Sentinel.app` you can drag to Applications. To install from the tarball on a Mac with no .NET:
 
 ```bash
-tar xzf networksentinel-0.7.5-osx-arm64.tar.gz
-cd networksentinel-0.7.5-osx-arm64
+tar xzf networksentinel-0.7.13-osx-arm64.tar.gz
+cd networksentinel-0.7.13-osx-arm64
 sudo ./install.sh                        # /Applications + /usr/local/bin
 ./install.sh --user                      # ~/Applications + ~/.local/bin, no root
 sudo ./install.sh --desktop-shortcut     # also drop a shortcut on the Desktop
@@ -462,6 +523,47 @@ PF details:
 - First authorize may append an anchor hook to `/etc/pf.conf` (backup: `/etc/pf.conf.networksentinel.bak`)
 - Only Network Sentinel’s own rules are managed; other PF rules are left alone
 
+### Firewall elevation on a headless Mac
+
+The macOS admin dialog is drawn by the window server on the Mac running the process.
+That is fine for the desktop app and for the TUI, which can fall back to sudo's own
+prompt on its TTY — and useless for the **web console**, where the operator is in a
+browser somewhere else. A browser cannot answer a dialog raised on the host, so
+*asking* is off the table entirely: the console has to already hold the right to
+write.
+
+From 0.7.10 it says so before the form rather than at the save. Firewall Config
+carries a **Read-only** notice with the fix already written out for this host, and
+Add / Edit / Delete are disabled while it is showing. Apply a fix, then press
+**Rescan the host firewall** (or **Authorize firewall**, which on the web console
+re-checks rather than prompting) and the notice clears.
+
+Two ways to give it the right, in the order the notice offers them:
+
+```bash
+# 1. Run the console itself as root
+sudo ./NetworkSentinel --web
+
+# 2. Or keep it running as this user, with passwordless sudo
+echo 'YOUR_USER ALL=(root) NOPASSWD: /bin/bash' | sudo tee /etc/sudoers.d/networksentinel
+sudo chmod 0440 /etc/sudoers.d/networksentinel
+sudo visudo -c
+```
+
+**The second is a root shell in all but name,** and the notice says so rather than
+passing it off as scoped to the firewall. PF rules here are applied by generating a
+ruleset and running it as a script, so the grant has to name `/bin/bash`; there is no
+equivalent of the Linux port's line naming `nft` and `ufw`, and no `CAP_NET_ADMIN` to
+hold instead. On a shared Mac, run the console as root.
+
+Either route is also what lets **auto-block expiry** run. Timed blocks are swept by a
+background timer that will not raise a password dialog in anyone's face, so it only
+sweeps when the rule can be removed without asking. That probe is cached from 0.7.10,
+because a refused `sudo -n` is written to the very log this app watches for break-in
+attempts and a probe per snapshot would have Network Sentinel reporting on itself;
+**Rescan** and **Authorize firewall** clear the cache, so a grant written a moment ago
+is seen at once.
+
 ---
 
 ## Using the app
@@ -489,6 +591,7 @@ PF details:
 | **Serve the console over HTTPS** | On/off, with the TLS port beside it |
 | **Certificate** / **Private key** | Filled in by **Issue certificate**; editable if the files live elsewhere |
 | **Redirect HTTP to HTTPS** | On by default |
+| **HTTPS only (turn off plain HTTP)** | Off by default (0.7.6). Needs HTTPS on with a working certificate; takes effect the next time the web console starts |
 
 A status line at the top of the card shows certificate expiry, the live DuckDNS result, and the full console URL once both halves are configured. Certificate and port changes apply the next time the **web console** starts — the desktop app doesn't serve anything itself — but the **DuckDNS refresh runs in the desktop app too**, so the hostname stays current whenever either front-end is open.
 
@@ -648,6 +751,10 @@ The meter runs on its own 5-second cadence rather than the monitor's poll: the b
 | Problem | What to do |
 |---------|------------|
 | Password dialog cancelled | Click **Authorize firewall** again, or allow the dialog when blocking. |
+| **The web console says Firewall Config is read-only** | It is: the admin dialog would open on the Mac running the console, not in your browser. The notice carries the two fixes for this host — see [Firewall elevation on a headless Mac](#firewall-elevation-on-a-headless-mac). Before 0.7.10 the console drew the editor anyway, accepted a rule, and then held the request for five minutes waiting on a dialog nobody could see. |
+| **A rule cannot be deleted: "Several rules have exactly that shape"** | Fixed in 0.7.9. Two rules of the same shape — which is what you end up with after a delete appears to fail and you add it again — matched either row's key, so the lookup refused both and neither could be deleted or edited afterwards. The identity now carries the rule's name and anchor as well, and rows nothing could tell apart are taken first rather than refused. |
+| **"No rule named X" for a rule that is already gone** | One managed rule can hold several rows in the scan — an inbound rule and the outbound sibling written with it — and removing any one row takes them all. A click on a sibling row therefore arrives after the rule has gone, which is what was asked for. Since 0.7.9 the message says that rather than reading as delete being broken. |
+| **Linux or Windows says it needs root / administrator privileges** | This is the macOS port — it reads this Mac's sockets and writes PF rules, none of which another OS has, so no privilege level there can apply a rule. Run it on a Mac, or use the Linux or Windows port. Since 0.7.9 it says that instead of asking to be elevated; `NETWORKSENTINEL_ALLOW_UNSUPPORTED_OS=1` starts the console modes anyway, though they cannot do anything useful. |
 | `.NET location: Not found` | Set `DOTNET_ROOT` / `PATH` to your .NET install, or use a self-contained publish. |
 | Process names missing | Expected for protected / other users’ processes; monitoring still works. |
 | PF rules not taking effect | Run **Authorize firewall** once so the anchor is hooked into `/etc/pf.conf`. Check `sudo pfctl -a com.networksentinel -s rules`. |
