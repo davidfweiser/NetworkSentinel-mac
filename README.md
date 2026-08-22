@@ -4,7 +4,7 @@ Native **macOS** desktop app for **live network monitoring**, **data-flow meteri
 
 > **Host-based** intrusion detection and prevention. It detects on its own heuristics and, with Suricata attached (0.6.x), on signature/payload inspection — then enforces in the kernel via **PF**. It is not an inline network appliance: it protects the Mac it runs on, not a segment, and it does not sit in the forwarding path.
 
-macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.13**.
+macOS port of [davidfweiser/NetworkSentinel](https://github.com/davidfweiser/NetworkSentinel) (Linux Avalonia / original Windows WPF). Platform layers use **`lsof`/`netstat`/`nettop`**, **PF (`pfctl`)** elevated via **osascript** or **sudo**, the **macOS unified log** (`log stream`), and **`~/Library/Application Support/NetworkSentinel`**. Version **0.7.16**.
 
 ---
 
@@ -81,7 +81,7 @@ Reading `eve.json` usually needs root or a mode change; the status line says so 
 
 ### WireGuard peer monitoring (0.6.x)
 
-WireGuard is a single **unconnected UDP socket**, so a peer's traffic never becomes a tracked connection — on a VPN server, the socket table shows nothing about who is attached. This reads `wg show all dump` instead, and alerts on new peers, handshakes going stale, and per-peer transfer volume.
+WireGuard is a single **unconnected UDP socket**, so a peer's traffic never becomes a tracked connection — on a VPN server, the socket table shows nothing about who is attached. This reads `wg show all dump` instead, and alerts on new peers and handshakes going stale, and counts per-peer transfer volume.
 
 ```bash
 brew install wireguard-tools   # provides `wg`; needs root to read device state
@@ -92,6 +92,14 @@ Enable **Settings → Intrusion detection → WireGuard peer watch**. `wg` is re
 **No key material is ever read.** A device line's second field is the interface *private* key and a peer line's third is the *preshared* key; both are skipped rather than parsed, and a test asserts neither can appear in a parsed peer.
 
 **A peer's public endpoint is protected from auto-block.** That endpoint is where the client's encrypted packets come from, so blocking it kills that client's VPN — and a peer alert (or any other detector tripping on peer traffic) would otherwise nominate exactly that address. Manual blocking is deliberately unaffected.
+
+**Per-peer transfer is counted, not accused (0.7.15).** It is off by default, and informational when on: a VPN user
+streaming video legitimately moves gigabytes, so any threshold low enough to catch a slow leak would fire constantly
+on normal use. Through 0.7.14 a peer crossing the figure raised a **High Data Exfiltration** threat, which was wrong
+twice over — the counter sees encrypted volume and nothing of what is inside, and the threat carried the peer's
+*endpoint* as its source address, the one address that must never be auto-blocked. It is now an **Info** VPN Peer
+Change: *"WireGuard peer … moved N MB"*, worth reading only if that peer should have been idle. Forwarded tunnel
+traffic still has no local socket, so this remains the only place it is counted at all.
 
 ### DNS hygiene (0.6.x)
 
@@ -122,6 +130,84 @@ This is where macOS differs from the Linux build, which subscribes to conntrack 
 - **It needs root**, and unlike a netlink subscription the privilege is spent *per poll*, so it only runs when elevation is silent (root, or passwordless/cached `sudo` for `pfctl`). It never raises a password dialog — a monitor that prompts once a second is worse than one that is off. The status line says which of these is missing.
 
 The app still does not configure your resolver. Installing a local forwarder and pointing it upstream over DoT is a one-time job whose failure mode takes out name resolution for this Mac and every tunnel client at once — a different kind of tool from a monitor.
+
+### DNS filtering — the switch (0.7.15)
+
+**Settings → DNS filtering** turns name filtering on and off at an **AdGuard Home** resolver, from the desktop app,
+the TUI and the web console alike. It is the only control in this app that can stop a connection *before it is
+attempted*: everything else acts on a flow that already exists, and the prevention engine writes a rule for an
+address the socket tables have already seen. A resolver refuses to answer, so the client never learns an address and
+never dials out.
+
+**The resolver is not installed from here — that part is the Linux build's.** `scripts/setup-dns-filter.sh` over
+there stands AdGuard Home up on the node it configures: bound to the tunnel address and loopback only, DoT upstream,
+no plaintext fallback, its own nftables tables. macOS is the console side of that arrangement, so this build ships no
+such script and nothing here writes to the resolver beyond the protection switch. What it needs is three fields:
+
+| Field | Value |
+|-------|-------|
+| **Filtering resolver** | The admin API's address as reachable from this Mac — usually the gateway's tunnel address, e.g. `10.8.0.1:3000`. A bare host gets AdGuard's UI port; a bare `https://` host gets 443 |
+| **Resolver user** | `admin` on a stock AdGuard Home; empty if it needs no login |
+| **Resolver password** | That user's password. Written to `settings.json`, which is owner-only, and the web console never sends it back to the page — it renders a placeholder, so re-saving the form leaves the stored value alone and clearing the field removes it |
+
+**It switches filtering, not the resolver.** Stopping the service would take DNS away from every tunnel client at
+once — an outage, not "filtering off". Switching protection off leaves the resolver answering normally and
+unfiltered, which is what AdGuard Home's own *Disable protection* does and the only reading of the switch that
+cannot strand a client mid-session.
+
+**The state is read back from the resolver, never mirrored into `settings.json`.** Anyone can flip protection in
+AdGuard's own UI, and a switch that reports *on* while nothing is being filtered is worse than no switch — the same
+reasoning that makes the auto-block status come from the engine rather than from the settings. What is stored here is
+only the address and the credentials needed to reach the API.
+
+The status line beside the switch distinguishes three states, because they need different responses:
+
+| Status | Means |
+|--------|-------|
+| `Filtering names at the resolver` | Working |
+| `Resolver answering UNFILTERED — protection is off` | Deliberately off; DNS still resolves |
+| `Resolver unreachable (…)` | Cannot tell — the service is down, the address is wrong, or the credentials were rejected |
+
+"Cannot tell" is deliberately never rendered as "off". A resolver that has stopped answering is a different problem
+from one that has been told to stop filtering, and reporting the first as the second sends you looking for a setting
+when the service is simply down.
+
+When the switch reverts, the message beside it names the reason:
+
+| Message | Cause | Fix |
+|---------|-------|-----|
+| `DNS filtering is not configured` | No resolver address in the panel | Type the admin address into **Filtering resolver** |
+| `could not be reached` | Nothing is listening at that address — the resolver is down, the address is wrong, or the tunnel is not up from this Mac | `nc -vz 10.8.0.1 3000` from here, then correct the field |
+| `the resolver rejected the credentials` | AdGuard has a password and the app has none, or the wrong one | The **Resolver user** / **Resolver password** fields |
+| `the resolver answered 415` | The request went out as `application/json; charset=utf-8`, which AdGuard compares rather than parses. Fixed in 0.7.15 | Upgrade; nothing to configure |
+
+#### Blocked Sites — what the resolver actually refused (0.7.16)
+
+A **Blocked Sites** item appears in the navigation — the desktop rail and the web console alike — as soon as a
+filtering resolver is configured, and takes itself away again if the address is cleared. It lists what the resolver
+turned down, newest first:
+
+| Column | From |
+|--------|------|
+| Time | The query's timestamp, in this machine's local time |
+| Name | The name that was asked for |
+| Client | Which tunnel client asked |
+| Why | `Blocklist`, `Safe browsing`, `Parental`, `Blocked service`… — AdGuard's reason code in words, and unknown codes pass through as themselves rather than as a blank column |
+| Rule | The filter rule that matched |
+
+It reads AdGuard's own query log — `/control/querylog?response_status=blocked` — **when you open the view and when
+you press Refresh, never on the dashboard poll**. The query log is the busiest thing AdGuard serves, and this console
+polls its own state every couple of seconds against a resolver every tunnel client depends on for every name they
+resolve.
+
+Three answers that look alike are kept apart, for the same reason the switch's status line keeps them apart: an empty
+log ("nothing blocked yet — or the query log is switched off in AdGuard") is not a refused login, and neither is a
+resolver that cannot be reached.
+
+> **This blocks by name, and that is a real limit.** An empty list is not proof of a quiet network: malware that
+> dials a hard-coded IP makes no DNS query and never appears here, and a phishing domain registered an hour ago is on
+> no list yet. Name filtering and the IP-based threat-intel feeds cover different halves of the problem, which is why
+> both are on by default.
 
 ### Remote alerting (webhook)
 Set **Settings → Webhook URL** to push Critical threats off the machine — the payload adapts automatically: **ntfy** (plain text + `Title`/`Priority` headers), **Slack** (`{"text": …}`), **Discord** (`{"content": …}`), anything else gets a generic JSON document. Per-source/type cooldown stops a burst from flooding the channel.
@@ -356,9 +442,10 @@ splitting the width between two unreadable columns.
 | **Firewall & Block** | Managed rules grouped as In/Out pairs; manual IP and port blocking; **Restore allowlisted** |
 | **Firewall Config** (0.7.1, rebuilt 0.7.3) | The whole host firewall — the pf ruleset, Apple's anchors, the Application Firewall and Network Sentinel's own rules — plus listening services and their firewall verdict; add / edit / delete, and (0.7.4) **New rule** on a listener row to start one prefilled from that socket. Since 0.7.5 it says the same three lines the desktop page does |
 | **Allowlist** | Add/remove trusted domains and IPs; refresh the feed |
-| **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **Suricata alerts**, **WireGuard peer watch**, **PF flow events**, **DNS hygiene**, **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity + **dry run**, block direction, allowlist feed, **change master password**, **Remove all rules** |
+| **Blocked Sites** (0.7.16) | What the filtering resolver refused — name, client, reason and rule, newest first. Present only while a resolver is configured; read on arrival and on **Refresh**, never on the live poll |
+| **Settings** | Monitoring on/off, page refresh speed, poll interval, geo lookups, auth-log monitoring, closed-port scan detection, critical threat alerts, **Suricata alerts**, **WireGuard peer watch**, **PF flow events**, **DNS hygiene**, **DNS filtering** (on/off, resolver address, and the user and password to reach it), **HTTPS + DuckDNS remote access** (incl. one-click **Issue certificate**), auto-block + minimum severity + **dry run**, block direction, allowlist feed, **change master password**, **Remove all rules** |
 
-The navigation rail shows the running version (e.g. `v0.7.13`) — check it after an upgrade to confirm the new build
+The navigation rail shows the running version (e.g. `v0.7.16`) — check it after an upgrade to confirm the new build
 is live. Since 0.7.2 the console notices this for you: a tab left open across an upgrade shows a banner naming both
 versions and offering a reload, because the page polls `/api/state` but never re-requests its own HTML, so the old UI
 would otherwise stay put and look like the upgrade never installed. It never reloads on its own — you may be
@@ -473,8 +560,8 @@ Self-contained (no system .NET runtime needed):
 `package.sh` produces `dist/networksentinel-<version>-<rid>.tar.gz` plus a ready `dist/Network Sentinel.app` you can drag to Applications. To install from the tarball on a Mac with no .NET:
 
 ```bash
-tar xzf networksentinel-0.7.13-osx-arm64.tar.gz
-cd networksentinel-0.7.13-osx-arm64
+tar xzf networksentinel-0.7.16-osx-arm64.tar.gz
+cd networksentinel-0.7.16-osx-arm64
 sudo ./install.sh                        # /Applications + /usr/local/bin
 ./install.sh --user                      # ~/Applications + ~/.local/bin, no root
 sudo ./install.sh --desktop-shortcut     # also drop a shortcut on the Desktop
@@ -577,6 +664,7 @@ is seen at once.
 | **Open Ports** | Listening TCP/UDP; optional inbound port block |
 | **Firewall & Block** | Manual IP/port rules, auto-block, allowlist, managed rule list |
 | **Firewall Config** | Add / edit / delete inbound and outbound rules — Linode-style lists per direction |
+| **Blocked Sites** (0.7.16) | Names the filtering resolver refused. Shown only while one is configured |
 | **Settings** | Mirrors the web console's Settings tab, including **Remote access** (below) |
 
 ### Remote access from the desktop Settings (0.5.0)
@@ -688,6 +776,7 @@ The meter runs on its own 5-second cadence rather than the monitor's poll: the b
 | `Services/SuricataService.cs` | Tails Suricata's EVE JSON and turns alerts into threat events |
 | `Services/WireGuardMonitor.cs` | `wg show all dump` — peers, handshakes, per-peer transfer; reads no key material |
 | `Services/DnsHygieneMonitor.cs` | Plaintext/DoT/DoH classification, resolver drift, allowlist poisoning |
+| `Services/DnsFilterService.cs` | The DNS filtering switch and the blocked-query reader — AdGuard Home's API over HTTP |
 | `Native/PfStateFlows.cs` | PF state-table flow events (UDP + forwarded traffic) — the macOS stand-in for conntrack netlink |
 | `Tests/NetworkSentinel.Tests/` | xunit suite (235 tests); `TestEnv` redirects `HOME` so nothing touches the real profile |
 | `ViewModels/MainViewModel.cs` | UI state, commands, auto-block wiring, Settings view (incl. Remote access) |
@@ -727,6 +816,7 @@ The meter runs on its own 5-second cadence rather than the monitor's poll: the b
 | `wg` on `PATH` | `wg` by absolute Homebrew path — a Finder- or launchd-launched app does not inherit the shell `PATH` |
 | polkit wording for elevation failures | osascript's `User canceled. (-128)`, which is what a dismissed admin dialog returns |
 | `XDG_DATA_HOME` redirect in tests | `HOME` redirect, since `AppPaths` resolves Application Support from the user profile |
+| `scripts/setup-dns-filter.sh` installs the filtering resolver | Not shipped. That script is systemd units, nftables tables and `resolv.conf` handling on the node serving the tunnel; this build is the console side of it, so the resolver's address and credentials are typed into **Settings → DNS filtering** and everything else — the switch, the status line, **Blocked Sites** — works the same against a resolver another machine hosts |
 
 ---
 

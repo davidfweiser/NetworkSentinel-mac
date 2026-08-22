@@ -16,6 +16,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     // The shared graph is built and cross-wired by SentinelCore; these are views
     // onto it so the rest of this class reads unchanged.
     private readonly SentinelCore _core = new();
+    private readonly DnsFilterService _dnsFilter;
     private readonly NetworkMonitorService _monitor;
     private readonly FirewallService _firewall;
     private readonly AllowlistService _allowlist;
@@ -38,6 +39,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _showPorts;
     [ObservableProperty] private bool _showFirewall;
     [ObservableProperty] private bool _showSettings;
+    [ObservableProperty] private bool _showDnsBlocked;
+
+    /// <summary>
+    /// Whether a filtering resolver is configured at all. The blocked-sites rail item
+    /// is bound to this: without a resolver the view has nothing to read, and an item
+    /// that only ever says "not configured" is a worse answer than no item.
+    /// </summary>
+    [ObservableProperty] private bool _dnsFilterConfigured;
     [ObservableProperty] private string _searchText = "";
     [ObservableProperty] private string _heroSubtitle = "Watching local ports, remote peers, and break-in patterns in real time.";
     [ObservableProperty] private string _firewallStatusText = "";
@@ -78,6 +87,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _authLogStatusText = "";
     [ObservableProperty] private string _probeLogStatusText = "";
     [ObservableProperty] private string _settingsMessage = "";
+    [ObservableProperty] private string _dnsFilterUrl = "";
+    [ObservableProperty] private string _blockedSitesStatus = "";
+    [ObservableProperty] private string _dnsFilterUsername = "";
+    [ObservableProperty] private string _dnsFilterPassword = "";
     [ObservableProperty] private bool _threatIntelEnabled = true;
     [ObservableProperty] private bool _processReputationEnabled = true;
     [ObservableProperty] private bool _newListenerAlertsEnabled = true;
@@ -189,6 +202,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _firewall = _core.Firewall;
         _allowlist = _core.Allowlist;
         _prevention = _core.Prevention;
+        _dnsFilter = _core.DnsFilter;
         _autoBlockEnabled = _settings.AutoBlockEnabled;
         _autoBlockMinLevel = _settings.AutoBlockMinLevel;
         if (!AutoBlockLevelOptions.Contains(_autoBlockMinLevel))
@@ -212,6 +226,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _uiScale = _settings.GetUiScale();
         _selectedUiScale = ScaleValueToLabel(_uiScale);
         _threatIntelEnabled = _settings.ThreatIntelEnabled;
+        _dnsFilterUrl = _settings.DnsFilterUrl;
+        _dnsFilterConfigured = _settings.DnsFilterUrl.Length > 0;
+        _dnsFilterUsername = _settings.DnsFilterUsername;
+        _dnsFilterPassword = _settings.DnsFilterPassword;
         _processReputationEnabled = _settings.ProcessReputationEnabled;
         _newListenerAlertsEnabled = _settings.NewListenerAlertsEnabled;
         _arpWatchEnabled = _settings.ArpWatchEnabled;
@@ -639,6 +657,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         ShowFirewall = SelectedNav == "Firewall";
         ShowFirewallConfig = SelectedNav == "FirewallConfig";
         ShowSettings = SelectedNav == "Settings";
+        ShowDnsBlocked = SelectedNav == "DnsBlocked";
 
         if (ShowFirewall)
             RefreshFirewallRules();
@@ -646,6 +665,27 @@ public partial class MainViewModel : ObservableObject, IDisposable
             _ = RefreshFirewallConfigAsync();
         if (ShowSettings)
             RefreshMonitorStatusText();
+        // Read on arrival rather than on the poll: this is the resolver's query log,
+        // and every tunnel client depends on that resolver answering.
+        if (ShowDnsBlocked)
+            _ = RefreshBlockedSitesAsync();
+    }
+
+    /// <summary>Names the resolver refused, newest first. Empty when it cannot be read.</summary>
+    public ObservableCollection<DnsFilterService.BlockedQuery> BlockedSites { get; } = new();
+
+    [RelayCommand]
+    private async Task RefreshBlockedSitesAsync()
+    {
+        BlockedSitesStatus = "Reading the resolver…";
+        var (ok, message, entries) = await _dnsFilter.GetBlockedAsync().ConfigureAwait(true);
+        BlockedSites.Clear();
+        if (ok)
+        {
+            foreach (var entry in entries)
+                BlockedSites.Add(entry);
+        }
+        BlockedSitesStatus = message;
     }
 
     // ── Settings handlers ─────────────────────────────────────────────────────
@@ -746,6 +786,119 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _settings.UiScale = scale;
         _settings.Save();
         SettingsMessage = $"Text size: {value}";
+    }
+
+    private bool _dnsFilterEnabled;
+
+    /// <summary>
+    /// The DNS filtering switch. Written from two directions that must not be confused:
+    /// the user flipping it, which has to reach the resolver, and the background read
+    /// discovering what the resolver actually says, which must not. A generated
+    /// [ObservableProperty] gives one setter for both, and the sync path would then
+    /// push a write back for a state it had just been told — so this one is by hand.
+    /// </summary>
+    public bool DnsFilterEnabled
+    {
+        get => _dnsFilterEnabled;
+        set
+        {
+            if (_dnsFilterEnabled == value) return;
+            _dnsFilterEnabled = value;
+            OnPropertyChanged();
+
+            // Nothing is persisted: the resolver owns this state. Only the address is ours.
+            var (ok, message) = _dnsFilter.SetProtection(value);
+            SettingsMessage = message;
+            if (!ok)
+            {
+                // Put the switch back where reality is, or it sits lit over a resolver
+                // that never changed.
+                _dnsFilterEnabled = !value;
+                OnPropertyChanged();
+            }
+            OnPropertyChanged(nameof(DnsFilterStatus));
+        }
+    }
+
+    /// <summary>
+    /// Adopts the resolver's own answer without calling back out to it — the read path
+    /// of <see cref="DnsFilterEnabled"/>.
+    /// </summary>
+    private void SyncDnsFilterFromResolver(bool live)
+    {
+        if (_dnsFilterEnabled == live) return;
+        _dnsFilterEnabled = live;
+        OnPropertyChanged(nameof(DnsFilterEnabled));
+    }
+
+    /// <summary>
+    /// Live filtering state, read back from the resolver rather than from settings.json —
+    /// anyone can flip protection in AdGuard's own UI, and a switch that claims "on"
+    /// while nothing is filtered is worse than no switch. Refreshed in the background.
+    /// </summary>
+    public string DnsFilterStatus
+    {
+        get
+        {
+            _dnsFilter.EnsureFresh();
+            SyncDnsFilterFromResolver(_dnsFilter.ProtectionEnabled == true);
+            return _dnsFilter.Status;
+        }
+    }
+
+    partial void OnDnsFilterUrlChanged(string value)
+    {
+        var normalised = DnsFilterService.NormalizeBaseUrl(value);
+        if (value.Trim().Length > 0 && normalised.Length == 0)
+        {
+            SettingsMessage = "Enter the resolver's admin address, e.g. 10.8.0.1:3000 or http://10.8.0.1:3000.";
+            return;
+        }
+
+        // The TextBox reports every keystroke, so only act when the address actually
+        // settled somewhere new — otherwise typing one URL rewrites settings.json a
+        // character at a time.
+        if (normalised == _settings.DnsFilterUrl) return;
+
+        _settings.DnsFilterUrl = normalised;
+        _settings.Save();
+        _dnsFilter.Configure(normalised, _settings.DnsFilterUsername, _settings.DnsFilterPassword);
+        DnsFilterConfigured = normalised.Length > 0;
+        if (!DnsFilterConfigured && ShowDnsBlocked)
+            Navigate("Dashboard");
+        SettingsMessage = normalised.Length == 0
+            ? "DNS filter resolver cleared — the switch has nothing to control."
+            : $"DNS filter resolver: {normalised}";
+        OnPropertyChanged(nameof(DnsFilterStatus));
+    }
+
+    partial void OnDnsFilterUsernameChanged(string value)
+    {
+        var trimmed = value.Trim();
+        // Same keystroke guard as the address above: a TextBox reports every character,
+        // and each one would otherwise be a settings.json write and an API reconfigure.
+        if (trimmed == _settings.DnsFilterUsername) return;
+
+        _settings.DnsFilterUsername = trimmed;
+        _settings.Save();
+        _dnsFilter.Configure(_settings.DnsFilterUrl, _settings.DnsFilterUsername, _settings.DnsFilterPassword);
+        SettingsMessage = trimmed.Length == 0
+            ? "DNS filter user cleared — the resolver is assumed to need no login."
+            : $"DNS filter user: {trimmed}";
+        OnPropertyChanged(nameof(DnsFilterStatus));
+    }
+
+    partial void OnDnsFilterPasswordChanged(string value)
+    {
+        if (value == _settings.DnsFilterPassword) return;
+
+        _settings.DnsFilterPassword = value;
+        _settings.Save();
+        _dnsFilter.Configure(_settings.DnsFilterUrl, _settings.DnsFilterUsername, _settings.DnsFilterPassword);
+        SettingsMessage = value.Length == 0
+            ? "DNS filter password cleared."
+            : "DNS filter password saved.";
+        OnPropertyChanged(nameof(DnsFilterStatus));
     }
 
     partial void OnThreatIntelEnabledChanged(bool value)

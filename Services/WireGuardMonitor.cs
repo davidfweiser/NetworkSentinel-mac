@@ -48,8 +48,9 @@ public sealed class WireGuardPeer
 ///   - a peer public key that was not in the baseline (someone was granted access)
 ///   - a known peer's endpoint moving to a different address (roaming, or a stolen key)
 ///   - a peer disappearing from the config
-///   - optionally, sustained data volume to one peer — the tunnel equivalent of the
-///     exfiltration monitor, which cannot see forwarded traffic at all
+///   - optionally, how much data went to one peer — an accounting note rather than a
+///     finding: forwarded tunnel traffic has no local socket, so nothing else counts it
+///     at all, but volume through a tunnel is the tunnel doing its job
 ///
 /// Key material: `wg show ... dump` prints the interface PRIVATE key and each peer's
 /// preshared key. Those fields are dropped at parse time and never stored, logged,
@@ -83,9 +84,11 @@ public sealed class WireGuardMonitor : IDisposable
     private volatile string _status = "WireGuard monitoring not started";
 
     /// <summary>
-    /// Megabytes sent to a single peer within 10 minutes before alerting. 0 disables it.
-    /// Off by default: a VPN user streaming video legitimately moves gigabytes, so any
-    /// threshold low enough to catch a slow leak would fire constantly on normal use.
+    /// Megabytes sent to a single peer within 10 minutes before it is noted. 0 disables it.
+    /// Off by default, and informational when on: a VPN user streaming video legitimately
+    /// moves gigabytes, so any threshold low enough to catch a slow leak would fire
+    /// constantly on normal use. What comes out is a volume notice at the figure you
+    /// picked, not a judgement that the traffic was wrong.
     /// </summary>
     public int TransferMbPer10Min { get; set; }
 
@@ -285,7 +288,8 @@ public sealed class WireGuardMonitor : IDisposable
     /// <summary>
     /// Rolling window of bytes sent to one peer. This is the only view of data leaving
     /// through the tunnel — ExfiltrationMonitor reads per-socket counters, and forwarded
-    /// VPN traffic has no local socket to count.
+    /// VPN traffic has no local socket to count. Counting it is worth doing; calling the
+    /// result exfiltration is not, which is why what it emits is Info.
     /// </summary>
     private void TrackTransfer(WireGuardPeer peer, DateTime now)
     {
@@ -318,13 +322,22 @@ public sealed class WireGuardMonitor : IDisposable
         _pending.Add(new ThreatEvent
         {
             Timestamp = now,
-            Type = ThreatType.DataExfiltration,
-            Level = ThreatLevel.High,
+            Type = ThreatType.VpnPeerChange,
+            // Not exfiltration, and not High. Bytes to a peer are what a tunnel is for: a
+            // client pulling a backup or streaming looks exactly like a leak from here,
+            // because all this counter sees is encrypted volume. Filing it as a High
+            // DataExfiltration also aimed a threat at the peer's endpoint — the one
+            // address the prevention engine must never block, and the reason
+            // IsWireGuardPeerEndpoint is wired into it. So: an observation, at the
+            // figure the operator asked to hear about.
+            Level = ThreatLevel.Info,
             SourceIp = string.IsNullOrEmpty(peer.EndpointIp) ? "127.0.0.1" : peer.EndpointIp,
-            Title = $"Large transfer to WireGuard peer {peer.ShortKey}",
+            Title = $"WireGuard peer {peer.ShortKey} moved {total / 1_000_000} MB",
             Detail = $"{total / 1_000_000} MB sent to peer {peer.PublicKey} on {peer.Interface} " +
-                     $"in the last {TransferWindow.TotalMinutes:0} minutes (threshold {TransferMbPer10Min} MB). " +
-                     "Forwarded VPN traffic has no local socket, so this is the only place it is counted.",
+                     $"in the last {TransferWindow.TotalMinutes:0} minutes, past the {TransferMbPer10Min} MB " +
+                     "figure this notice was set to. Ordinary for a tunnel in use — worth reading only if " +
+                     "that peer should have been idle. Forwarded VPN traffic has no local socket, so " +
+                     "this is the only place it is counted.",
             Origin = string.IsNullOrEmpty(peer.EndpointIp) ? "This computer" : "Resolving…",
             Method = "WireGuard per-peer transfer counter"
         });

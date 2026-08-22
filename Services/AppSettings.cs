@@ -107,6 +107,24 @@ public sealed class AppSettings
     /// </summary>
     public string DnsApprovedResolvers { get; set; } = "";
 
+    /// <summary>
+    /// Address of the filtering resolver's admin API — the AdGuard Home serving your
+    /// tunnel's clients, e.g. <c>http://10.8.0.1:3000</c>. Empty means no resolver is
+    /// under this app's control and the DNS filtering switch says so instead of
+    /// pretending to work.
+    /// </summary>
+    public string DnsFilterUrl { get; set; } = "";
+
+    /// <summary>Admin user for the filtering resolver's API. Empty means it needs no auth.</summary>
+    public string DnsFilterUsername { get; set; } = "";
+
+    /// <summary>
+    /// Admin password for the filtering resolver's API. Kept here for the same reason
+    /// the TLS key password is: settings.json is written owner-only, and the switch
+    /// cannot work without being able to authenticate.
+    /// </summary>
+    public string DnsFilterPassword { get; set; } = "";
+
     /// <summary>Check remote IPs against public threat-intel blocklists (FireHOL level1, Spamhaus DROP).</summary>
     public bool ThreatIntelEnabled { get; set; } = true;
 
